@@ -2,8 +2,10 @@ import { useState, useEffect } from "react"
 import { supabase } from "@/lib/supabase"
 
 export function useRelatorios(produtos: any[]) {
-  const [filtroCategoria, setFiltroCategoria] = useState<"Geral" | "Cozinha" | "Bebidas">("Geral")
-  const [modoVisao, setModoVisao] = useState<"resumo" | "comparacao" | "detalhado">("resumo")
+  const [filtroCategoria, setFiltroCategoria] = useState<string>("Geral")
+  const [modoVisao, setModoVisao] = useState<"resumo" | "comparacao" | "detalhado" | "precos">("resumo")
+
+  const categoriasDisponiveis = ["Geral", ...Array.from(new Set((produtos || []).map(p => p.grupo).filter(Boolean))).sort()]
   const [semanasData, setSemanasData] = useState<any[]>([])
   
   const [semanaSelecionadaModal, setSemanaSelecionadaModal] = useState<string>("")
@@ -48,8 +50,7 @@ export function useRelatorios(produtos: any[]) {
         let saidas = dbSaidas.data?.filter(s => s.data_saida >= f.data_inicio && s.data_saida <= f.data_fim) || []
 
         let prodsFiltrados = produtos || []
-        if (filtroCategoria === "Cozinha") prodsFiltrados = produtos.filter(p => p.grupo !== "Bebidas" && p.grupo !== "Embalagens" && p.grupo !== "Limpeza" && p.grupo !== "Outros")
-        else if (filtroCategoria === "Bebidas") prodsFiltrados = produtos.filter(p => p.grupo === "Bebidas")
+        if (filtroCategoria !== "Geral") prodsFiltrados = produtos.filter(p => p.grupo === filtroCategoria)
 
         const consumoDetalhado = prodsFiltrados.map(p => {
           const eI = est.find(e => e.produto_id === p.id && e.tipo_contagem === 'Inicial')
@@ -97,6 +98,7 @@ export function useRelatorios(produtos: any[]) {
 
   return {
     filtroCategoria, setFiltroCategoria,
+    categoriasDisponiveis,
     modoVisao, setModoVisao,
     semanasData,
     semanaSelecionadaModal, setSemanaSelecionadaModal,

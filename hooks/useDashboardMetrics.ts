@@ -1,42 +1,21 @@
 import { useState, useEffect } from "react"
 import { supabase } from "@/lib/supabase"
+import { calcularCMV } from "@/lib/utils"
 
 export function useDashboardMetrics({ dataInicio, dataFim, lancamentos, contagemInicial, contagemFinal, produtos }: any) {
   const [loadingHistorico, setLoadingHistorico] = useState(true)
   const [historicoSemanas, setHistoricoSemanas] = useState<any[]>([])
 
-  const faturamentoAtual = lancamentos?.faturamento || 0
-  const comprasAtual = (lancamentos?.compras || []).reduce((acc: number, c: any) => acc + parseFloat(c.valorTotal || 0), 0)
-  const deducoesAtual = (lancamentos?.saidas || []).reduce((acc: number, s: any) => acc + parseFloat(s.valorTotal || 0), 0)
-
-  const getValorEstoqueInicial = (contagem: any) => {
-    if (!contagem) return 0
-    return Object.values(contagem).reduce((acc: number, item: any) => {
-      return acc + (parseFloat(item.qtd || 0) * parseFloat(item.valor || 0))
-    }, 0)
-  }
-
-  const estInicialAtual = getValorEstoqueInicial(contagemInicial)
-
-  const estFinalAtual = produtos?.reduce((acc: number, p: any) => {
-    const qtdF = contagemFinal[p.id]?.qtd ? parseFloat(contagemFinal[p.id].qtd) : 0;
-    if (qtdF <= 0) return acc;
-    
-    const compProd = (lancamentos?.compras || []).filter((c: any) => c.produto === p.nome);
-    let precoAplicado = 0;
-    
-    if (compProd.length > 0) {
-        precoAplicado = parseFloat(compProd[compProd.length - 1].valorUnitario); 
-    } else {
-        precoAplicado = contagemInicial[p.id]?.valor ? parseFloat(contagemInicial[p.id].valor) : 0; 
-    }
-    
-    return acc + (qtdF * precoAplicado);
-  }, 0) || 0;
-
-  // A FÓRMULA DE VILHENA QUE VOCÊ PREFERE
-  const cmvRealR$ = estInicialAtual + comprasAtual - estFinalAtual - deducoesAtual;
-  const cmvRealPerc = faturamentoAtual > 0 ? (cmvRealR$ / faturamentoAtual) * 100 : 0
+  // Fórmula de Vilhena (CMV = EI + Compras − EF − Deduções) — fonte única em lib/utils.
+  const {
+    faturamento: faturamentoAtual,
+    compras: comprasAtual,
+    deducoes: deducoesAtual,
+    estInicial: estInicialAtual,
+    estFinal: estFinalAtual,
+    cmv: cmvRealR$,
+    margemCMV: cmvRealPerc,
+  } = calcularCMV({ lancamentos, contagemInicial, contagemFinal, produtos })
 
   useEffect(() => {
     const buscarHistorico = async () => {
