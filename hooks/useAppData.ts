@@ -43,7 +43,7 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
       ])
       const comprasFormatadas = (comprasDb.data || []).map(c => {
         const p = produtos.find(prod => prod.id === c.produto_id)
-        return { id: c.id, produto: p ? p.nome : 'Excluído', quantidade: parseFloat(c.quantidade), valorUnitario: parseFloat(c.valor_unitario), valorTotal: parseFloat(c.quantidade) * parseFloat(c.valor_unitario) }
+        return { id: c.id, produto_id: c.produto_id, produto: p ? p.nome : 'Excluído', quantidade: parseFloat(c.quantidade), valorUnitario: parseFloat(c.valor_unitario), valorTotal: parseFloat(c.quantidade) * parseFloat(c.valor_unitario) }
       })
       const saidasFormatadas = (saidasDb.data || []).map(s => {
         const p = produtos.find(prod => prod.id === s.produto_id)
@@ -86,9 +86,12 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
   const handleConfirmarFecharSemana = async () => {
     setFechandoSemana(true)
     toast.loading("Encerrando ciclo...", { id: "fechar-semana" })
-    const { data: ex } = await supabase.from('financas_semanais').select('id').eq('data_inicio', dataInicio).maybeSingle()
-    if (ex) await supabase.from('financas_semanais').update({ status: 'fechado' }).eq('id', ex.id)
-    else await supabase.from('financas_semanais').insert([{ data_inicio: dataInicio, data_fim: dataFim, status: 'fechado' }])
+    const { error } = await supabase.from('financas_semanais')
+      .upsert({ data_inicio: dataInicio, data_fim: dataFim, status: 'fechado' }, { onConflict: 'empresa_id,data_inicio' })
+    if (error) {
+      setFechandoSemana(false)
+      return toast.error("Erro ao fechar a semana: " + error.message, { id: "fechar-semana" })
+    }
     setBloqueioAtivo(false)
     setDataInicio(proximaSegunda(dataInicio))
     setShowModalFecharSemana(false)
@@ -119,9 +122,11 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
   const handleConfirmarPin = async () => {
     if (!pinDesbloqueio.trim()) return toast.error("Digite o PIN de desbloqueio.")
     setVerificandoPin(true)
-    const pinConfigurado = perfil?.empresa?.senha_desbloqueio
-    if (pinConfigurado) {
-      if (pinDesbloqueio !== pinConfigurado) {
+    const temPin = perfil?.empresa?.pin_configurado
+    if (temPin) {
+      // Validação do PIN é feita no servidor (hash bcrypt) — o PIN nunca trafega em texto plano.
+      const { data: pinOk, error: pinErr } = await supabase.rpc('validar_pin_desbloqueio', { p_pin: pinDesbloqueio })
+      if (pinErr || !pinOk) {
         setVerificandoPin(false)
         return toast.error("PIN incorreto.")
       }

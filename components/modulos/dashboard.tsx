@@ -80,8 +80,14 @@ function TooltipAtelier({ active, payload, label }: any) {
 // ── Dashboard principal ───────────────────────────────────────────────────────
 export function Dashboard(props: any) {
   const [modalAberto, setModalAberto] = useState<"compras" | null>(null)
-  const [alertaDismissed, setAlertaDismissed] = useState(false)
-  const [vencimentoDismissed, setVencimentoDismissed] = useState(false)
+  const ssKeyAlert = `m_alert_${props.dataInicio}`
+  const ssKeyLotes = `m_lotes_${props.dataInicio}`
+  const [alertaDismissed, setAlertaDismissed] = useState(() =>
+    typeof window !== 'undefined' && sessionStorage.getItem(ssKeyAlert) === '1'
+  )
+  const [vencimentoDismissed, setVencimentoDismissed] = useState(() =>
+    typeof window !== 'undefined' && sessionStorage.getItem(ssKeyLotes) === '1'
+  )
   const [lotesRisco, setLotesRisco] = useState<any[]>([])
 
   const metaCMV = parseFloat(props.perfil?.empresa?.meta_cmv) || 35
@@ -99,15 +105,16 @@ export function Dashboard(props: any) {
   const animEstFinal    = useCountUp(metrics.estFinalAtual, 700, 0)
 
   useEffect(() => {
-    setAlertaDismissed(false)
-    setVencimentoDismissed(false)
+    setAlertaDismissed(typeof window !== 'undefined' && sessionStorage.getItem(`m_alert_${props.dataInicio}`) === '1')
+    setVencimentoDismissed(typeof window !== 'undefined' && sessionStorage.getItem(`m_lotes_${props.dataInicio}`) === '1')
   }, [props.dataInicio])
 
   useEffect(() => { carregarLotesRisco() }, [])
 
   const carregarLotesRisco = async () => {
     try {
-      const { data } = await supabase.rpc('lotes_em_risco', { dias_aviso: 7 })
+      const diasAviso = props.perfil?.empresa?.dias_alerta_lote ?? 7
+      const { data } = await supabase.rpc('lotes_em_risco', { dias_aviso: diasAviso })
       setLotesRisco(data || [])
     } catch { /* RPC não existe ainda */ }
   }
@@ -236,18 +243,30 @@ export function Dashboard(props: any) {
                 cor={T.negative}
                 mensagem={`CMV ${formatPerc(metrics.cmvRealPerc)} — ${cmvDiff.toFixed(1)}pp acima da meta de ${formatPerc(metaCMV)}`}
                 detalhe="Analise os insumos com maior custo e revise as fichas técnicas."
-                onDismiss={() => setAlertaDismissed(true)}
+                onDismiss={() => { setAlertaDismissed(true); sessionStorage.setItem(ssKeyAlert, '1') }}
               />
             )}
-            {lotesRisco.length > 0 && !vencimentoDismissed && lotesRisco.map((l: any) => (
-              <AlertaItem
-                key={l.id}
-                cor={l.dias_para_vencer <= 0 ? T.negative : T.warning}
-                mensagem={`${nomeProduto(l.produto_id)} — ${l.dias_para_vencer <= 0 ? `vencido há ${Math.abs(l.dias_para_vencer)} dia(s)` : `vence em ${l.dias_para_vencer} dia(s)`}`}
-                detalhe="Verifique o estoque e utilize o método FEFO."
-                onDismiss={lotesRisco.indexOf(l) === 0 ? () => setVencimentoDismissed(true) : undefined}
-              />
-            ))}
+            {lotesRisco.length > 0 && !vencimentoDismissed && lotesRisco.map((l: any, idx: number) => {
+              const dias = l.dias_para_vencer
+              const sev = l.severidade ?? (dias < 0 ? 'vencido' : dias <= 2 ? 'critico' : 'alerta')
+              const estado = dias < 0
+                ? `vencido há ${Math.abs(dias)} dia(s)`
+                : dias === 0 ? 'vence hoje' : `vence em ${dias} dia(s)`
+              const detalhe = [
+                l.valor_em_risco ? `${formatBRL(l.valor_em_risco)} em risco` : null,
+                l.local_nome || null,
+                'use pelo método FEFO',
+              ].filter(Boolean).join(' · ')
+              return (
+                <AlertaItem
+                  key={l.id}
+                  cor={sev === 'alerta' ? T.warning : T.negative}
+                  mensagem={`${l.nome_produto || nomeProduto(l.produto_id)} — ${estado}`}
+                  detalhe={detalhe}
+                  onDismiss={idx === 0 ? () => { setVencimentoDismissed(true); sessionStorage.setItem(ssKeyLotes, '1') } : undefined}
+                />
+              )
+            })}
           </div>
         </div>
       )}

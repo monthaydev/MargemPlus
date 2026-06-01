@@ -23,6 +23,14 @@
 --            • plano_compras: parâmetro p_dias_cobertura, is_perecivel,
 --              dias_cobertura_efetiva.
 --            • engenharia_cardapio: preco_sugerido via Markup Divisor.
+--   v11   — lotes_em_risco turbinado: nome/unidade do insumo, número do
+--            lote, local, valor_em_risco (R$) e severidade (vencido/
+--            crítico/alerta). Migração: sql/migracao-lotes-em-risco.sql.
+--   v12   — Hardening (PARTE 17): PIN com hash bcrypt + validação no
+--            servidor, cadastro de funcionário sem brecha de privilégio,
+--            INSERT direto fechado em empresas/perfis, CHECKs de
+--            integridade e RPC salvar_contagem atômica.
+--            Migração: sql/migracao-hardening.sql.
 -- ================================================================
 
 
@@ -53,6 +61,12 @@ DROP FUNCTION IF EXISTS sou_dono()                                              
 DROP FUNCTION IF EXISTS set_empresa_id()                                             CASCADE;
 DROP FUNCTION IF EXISTS validar_codigo_convite(TEXT)                                 CASCADE;
 DROP FUNCTION IF EXISTS criar_conta_dono(TEXT, TEXT)                                 CASCADE;
+DROP FUNCTION IF EXISTS criar_conta_funcionario(TEXT, TEXT)                          CASCADE;
+DROP FUNCTION IF EXISTS definir_pin_desbloqueio(TEXT)                                CASCADE;
+DROP FUNCTION IF EXISTS remover_pin_desbloqueio()                                    CASCADE;
+DROP FUNCTION IF EXISTS validar_pin_desbloqueio(TEXT)                                CASCADE;
+DROP FUNCTION IF EXISTS salvar_contagem(TEXT, DATE, DATE, JSONB)                     CASCADE;
+DROP FUNCTION IF EXISTS salvar_ficha_ingredientes(UUID, JSONB)                       CASCADE;
 DROP FUNCTION IF EXISTS seed_empresa_defaults(UUID)                                  CASCADE;
 DROP FUNCTION IF EXISTS lotes_em_risco(INT)                                          CASCADE;
 DROP FUNCTION IF EXISTS previsao_ruptura_estoque()                                   CASCADE;
@@ -118,7 +132,10 @@ CREATE TABLE empresas (
   cor_principal       TEXT         NOT NULL DEFAULT 'petroleo',
   plano               TEXT         NOT NULL DEFAULT 'completo' CHECK (plano IN ('basico','completo')),
   -- v8: PIN para desbloquear ciclos fechados (≠ senha de login do Supabase)
+  -- v12: armazenado como HASH bcrypt (pgcrypto) — nunca em texto plano.
   senha_desbloqueio   TEXT         DEFAULT NULL,
+  -- v12: flag derivada (a UI sabe se há PIN sem nunca receber o hash)
+  pin_configurado     BOOLEAN      GENERATED ALWAYS AS (senha_desbloqueio IS NOT NULL) STORED,
   -- v8: Alíquota fiscal padrão — pré-preenche novas Fichas Técnicas
   imposto_padrao_pct  NUMERIC      NOT NULL DEFAULT 0,
   -- v8: Janela de alerta de validade de lotes (usado no RPC lotes_em_risco)
@@ -130,8 +147,7 @@ ALTER TABLE empresas ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "empresas_select" ON empresas FOR SELECT TO authenticated
   USING (id = minha_empresa_id());
-CREATE POLICY "empresas_insert" ON empresas FOR INSERT TO authenticated
-  WITH CHECK (true);
+-- v12: sem policy de INSERT direto — empresa só nasce via criar_conta_dono (SECURITY DEFINER).
 CREATE POLICY "empresas_update" ON empresas FOR UPDATE TO authenticated
   USING  (id = minha_empresa_id() AND sou_dono())
   WITH CHECK (id = minha_empresa_id() AND sou_dono());
@@ -159,8 +175,8 @@ ALTER TABLE perfis ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "perfis_select" ON perfis FOR SELECT TO authenticated
   USING (empresa_id = minha_empresa_id());
-CREATE POLICY "perfis_insert" ON perfis FOR INSERT TO authenticated
-  WITH CHECK (id = auth.uid());
+-- v12: sem policy de INSERT direto — perfil de dono nasce via criar_conta_dono e o de
+--      funcionário via criar_conta_funcionario (ambas SECURITY DEFINER, sempre role correto).
 CREATE POLICY "perfis_update_proprio" ON perfis FOR UPDATE TO authenticated
   USING     (id = auth.uid())
   WITH CHECK (id = auth.uid());
@@ -679,14 +695,21 @@ GRANT EXECUTE ON FUNCTION criar_conta_dono(TEXT, TEXT) TO authenticated;
 -- -------------------------------------------------------------
 -- RPC 4: lotes_em_risco
 -- -------------------------------------------------------------
+-- v11: turbinado — nome/unidade do insumo, lote, local, valor em risco (R$) e severidade
 CREATE OR REPLACE FUNCTION lotes_em_risco(dias_aviso INT DEFAULT 7)
 RETURNS TABLE(
   id               UUID,
   produto_id       INT,
+  nome_produto     TEXT,
+  unidade          TEXT,
+  numero_lote      TEXT,
+  local_nome       TEXT,
   data_validade    DATE,
   quantidade_atual NUMERIC,
   custo_unitario   NUMERIC,
-  dias_para_vencer INT
+  valor_em_risco   NUMERIC,
+  dias_para_vencer INT,
+  severidade       TEXT
 )
 LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public
 AS $$
@@ -695,11 +718,25 @@ BEGIN
     SELECT
       l.id,
       l.produto_id,
+      p.nome                                          AS nome_produto,
+      p.unidade,
+      l.numero_lote,
+      loc.nome                                        AS local_nome,
       l.data_validade,
       l.quantidade_atual,
       l.custo_unitario,
-      (l.data_validade - CURRENT_DATE)::INT AS dias_para_vencer
+      ROUND(l.quantidade_atual * l.custo_unitario, 2) AS valor_em_risco,
+      (l.data_validade - CURRENT_DATE)::INT           AS dias_para_vencer,
+      CASE
+        WHEN (l.data_validade - CURRENT_DATE) <  0 THEN 'vencido'
+        WHEN (l.data_validade - CURRENT_DATE) <= 2 THEN 'critico'
+        ELSE 'alerta'
+      END                                             AS severidade
     FROM lotes l
+    JOIN produtos p
+      ON p.id = l.produto_id AND p.empresa_id = minha_empresa_id()
+    LEFT JOIN locais_estoque loc
+      ON loc.id = l.local_id
     WHERE l.empresa_id    = minha_empresa_id()
       AND l.status        = 'ativo'
       AND l.data_validade IS NOT NULL
@@ -1138,9 +1175,193 @@ GRANT EXECUTE ON FUNCTION engenharia_cardapio() TO authenticated;
 
 
 -- ================================================================
--- CONCLUÍDO — SCHEMA v10 DEFINITIVO
--- 14 tabelas · 7 RPCs · RLS em todas as tabelas
+-- PARTE 17: HARDENING (v12) — segurança, integridade e robustez
+-- ================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 17.1 — Constraints de integridade (tabelas recém-criadas neste run)
+ALTER TABLE produtos          ADD CONSTRAINT chk_produtos_rendimento   CHECK (rendimento > 0 AND rendimento <= 100);
+ALTER TABLE compras           ADD CONSTRAINT chk_compras_qtd           CHECK (quantidade > 0);
+ALTER TABLE compras           ADD CONSTRAINT chk_compras_valor         CHECK (valor_unitario >= 0);
+ALTER TABLE estoques          ADD CONSTRAINT chk_estoques_qtd          CHECK (quantidade >= 0);
+ALTER TABLE estoques          ADD CONSTRAINT chk_estoques_valor        CHECK (valor_unitario >= 0);
+ALTER TABLE lotes             ADD CONSTRAINT chk_lotes_qtd_orig        CHECK (quantidade_orig > 0);
+ALTER TABLE lotes             ADD CONSTRAINT chk_lotes_qtd_atual       CHECK (quantidade_atual >= 0);
+ALTER TABLE lotes             ADD CONSTRAINT chk_lotes_qtd_coerente    CHECK (quantidade_atual <= quantidade_orig);
+ALTER TABLE lotes             ADD CONSTRAINT chk_lotes_custo           CHECK (custo_unitario >= 0);
+ALTER TABLE saidas_avulsas    ADD CONSTRAINT chk_saidas_qtd           CHECK (quantidade >= 0);
+ALTER TABLE saidas_avulsas    ADD CONSTRAINT chk_saidas_valor         CHECK (valor_total >= 0);
+ALTER TABLE fichas_tecnicas   ADD CONSTRAINT chk_fichas_porcoes        CHECK (porcoes >= 1);
+ALTER TABLE fichas_tecnicas   ADD CONSTRAINT chk_fichas_margem         CHECK (margem_desejada >= 0 AND margem_desejada <= 100);
+ALTER TABLE fichas_tecnicas   ADD CONSTRAINT chk_fichas_impostos       CHECK (impostos_pct >= 0 AND impostos_pct <= 100);
+ALTER TABLE fichas_tecnicas   ADD CONSTRAINT chk_fichas_embalagem      CHECK (embalagem_custo >= 0);
+ALTER TABLE fichas_tecnicas   ADD CONSTRAINT chk_fichas_custo_fixo     CHECK (custo_fixo_porcao >= 0);
+ALTER TABLE ficha_ingredientes ADD CONSTRAINT chk_fi_qtd              CHECK (quantidade > 0);
+ALTER TABLE canais_venda      ADD CONSTRAINT chk_canais_taxa           CHECK (taxa_pct >= 0 AND taxa_pct <= 100);
+ALTER TABLE financas_semanais ADD CONSTRAINT chk_financas_faturamento  CHECK (faturamento >= 0);
+ALTER TABLE financas_semanais ADD CONSTRAINT chk_financas_datas        CHECK (data_fim >= data_inicio);
+ALTER TABLE empresas          ADD CONSTRAINT chk_empresas_meta_cmv     CHECK (meta_cmv >= 0 AND meta_cmv <= 100);
+ALTER TABLE empresas          ADD CONSTRAINT chk_empresas_imposto      CHECK (imposto_padrao_pct >= 0 AND imposto_padrao_pct <= 100);
+ALTER TABLE empresas          ADD CONSTRAINT chk_empresas_dias_alerta  CHECK (dias_alerta_lote >= 0);
+ALTER TABLE vendas_pratos     ADD CONSTRAINT chk_vendas_qtd            CHECK (quantidade_vendida >= 0);
+
+-- 17.2 — Cadastro de funcionário sem brecha de privilégio (força role='funcionario')
+CREATE OR REPLACE FUNCTION criar_conta_funcionario(p_codigo TEXT, p_nome TEXT)
+RETURNS JSON
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_cargo cargos%ROWTYPE;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RETURN json_build_object('ok', false, 'erro', 'Usuário não autenticado.');
+  END IF;
+  IF EXISTS (SELECT 1 FROM perfis WHERE id = auth.uid()) THEN
+    RETURN json_build_object('ok', false, 'erro', 'Usuário já possui conta.');
+  END IF;
+  SELECT * INTO v_cargo FROM cargos WHERE codigo_convite = UPPER(TRIM(p_codigo)) LIMIT 1;
+  IF v_cargo.id IS NULL THEN
+    RETURN json_build_object('ok', false, 'erro', 'Código de convite inválido.');
+  END IF;
+  INSERT INTO perfis (id, empresa_id, nome_completo, cargo, cargo_id, role, ativo)
+  VALUES (auth.uid(), v_cargo.empresa_id, COALESCE(NULLIF(TRIM(p_nome), ''), 'Funcionário'),
+          v_cargo.nome, v_cargo.id, 'funcionario', true);
+  RETURN json_build_object('ok', true, 'empresa_id', v_cargo.empresa_id, 'cargo', v_cargo.nome);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION criar_conta_funcionario(TEXT, TEXT) TO authenticated;
+
+-- 17.3 — PIN de desbloqueio com hash bcrypt + validação no servidor
+CREATE OR REPLACE FUNCTION definir_pin_desbloqueio(p_pin TEXT)
+RETURNS JSON
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  IF NOT sou_dono() THEN
+    RETURN json_build_object('ok', false, 'erro', 'Apenas o dono pode definir o PIN.');
+  END IF;
+  IF p_pin IS NULL OR length(TRIM(p_pin)) < 4 THEN
+    RETURN json_build_object('ok', false, 'erro', 'O PIN deve ter ao menos 4 caracteres.');
+  END IF;
+  UPDATE empresas SET senha_desbloqueio = crypt(TRIM(p_pin), gen_salt('bf')) WHERE id = minha_empresa_id();
+  RETURN json_build_object('ok', true);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION definir_pin_desbloqueio(TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION remover_pin_desbloqueio()
+RETURNS JSON
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  IF NOT sou_dono() THEN
+    RETURN json_build_object('ok', false, 'erro', 'Apenas o dono pode remover o PIN.');
+  END IF;
+  UPDATE empresas SET senha_desbloqueio = NULL WHERE id = minha_empresa_id();
+  RETURN json_build_object('ok', true);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION remover_pin_desbloqueio() TO authenticated;
+
+CREATE OR REPLACE FUNCTION validar_pin_desbloqueio(p_pin TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_hash TEXT;
+BEGIN
+  SELECT senha_desbloqueio INTO v_hash FROM empresas WHERE id = minha_empresa_id();
+  IF v_hash IS NULL OR p_pin IS NULL THEN RETURN false; END IF;
+  RETURN v_hash = crypt(TRIM(p_pin), v_hash);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION validar_pin_desbloqueio(TEXT) TO authenticated;
+
+-- 17.4 — Contagem de estoque atômica (delete + insert numa transação)
+CREATE OR REPLACE FUNCTION salvar_contagem(p_tipo TEXT, p_data DATE, p_data_fim DATE, p_itens JSONB)
+RETURNS JSON
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_empresa UUID;
+  v_item    JSONB;
+  v_qtd     INT := 0;
+BEGIN
+  v_empresa := minha_empresa_id();
+  IF v_empresa IS NULL THEN
+    RETURN json_build_object('ok', false, 'erro', 'Usuário sem empresa vinculada.');
+  END IF;
+  IF p_tipo NOT IN ('Inicial', 'Final') THEN
+    RETURN json_build_object('ok', false, 'erro', 'Tipo de contagem inválido.');
+  END IF;
+
+  DELETE FROM estoques
+   WHERE empresa_id = v_empresa AND tipo_contagem = p_tipo
+     AND data_contagem >= p_data AND data_contagem <= p_data_fim;
+
+  IF p_itens IS NOT NULL THEN
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_itens) LOOP
+      INSERT INTO estoques (empresa_id, produto_id, quantidade, valor_unitario, tipo_contagem, data_contagem)
+      VALUES (v_empresa, (v_item->>'produto_id')::INT,
+              COALESCE((v_item->>'quantidade')::NUMERIC, 0),
+              COALESCE((v_item->>'valor_unitario')::NUMERIC, 0), p_tipo, p_data);
+      v_qtd := v_qtd + 1;
+    END LOOP;
+  END IF;
+
+  RETURN json_build_object('ok', true, 'itens', v_qtd);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION salvar_contagem(TEXT, DATE, DATE, JSONB) TO authenticated;
+
+-- 17.5 — Ingredientes da ficha técnica de forma atômica (delete + insert numa transação)
+CREATE OR REPLACE FUNCTION salvar_ficha_ingredientes(p_ficha_id UUID, p_itens JSONB)
+RETURNS JSON
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_empresa UUID;
+  v_dona    UUID;
+  v_item    JSONB;
+  v_qtd     INT := 0;
+BEGIN
+  v_empresa := minha_empresa_id();
+  IF v_empresa IS NULL THEN
+    RETURN json_build_object('ok', false, 'erro', 'Usuário sem empresa vinculada.');
+  END IF;
+
+  SELECT empresa_id INTO v_dona FROM fichas_tecnicas WHERE id = p_ficha_id;
+  IF v_dona IS NULL OR v_dona <> v_empresa THEN
+    RETURN json_build_object('ok', false, 'erro', 'Ficha não encontrada ou de outra empresa.');
+  END IF;
+
+  DELETE FROM ficha_ingredientes WHERE ficha_id = p_ficha_id;
+
+  IF p_itens IS NOT NULL THEN
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_itens) LOOP
+      INSERT INTO ficha_ingredientes (ficha_id, produto_id, quantidade)
+      VALUES (
+        p_ficha_id,
+        (v_item->>'produto_id')::INT,
+        COALESCE((v_item->>'quantidade')::NUMERIC, 0)
+      );
+      v_qtd := v_qtd + 1;
+    END LOOP;
+  END IF;
+
+  RETURN json_build_object('ok', true, 'itens', v_qtd);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION salvar_ficha_ingredientes(UUID, JSONB) TO authenticated;
+
+
+-- ================================================================
+-- CONCLUÍDO — SCHEMA v12 DEFINITIVO
+-- 14 tabelas · 12 RPCs · RLS em todas as tabelas · CHECKs de integridade
 -- Plano Básico:   CMV · Estoque · Fichas · Relatórios · Sistema
 -- Plano Completo: + Ruptura (v10) · + Compras (v10) · + Cardápio BCG (v10)
+-- Segurança v12: PIN com hash bcrypt, cadastro sem escalonamento de
+--   privilégio, INSERT direto fechado em empresas/perfis.
 -- DEV: plano default = 'completo' · usuários e dados zerados a cada run
 -- ================================================================

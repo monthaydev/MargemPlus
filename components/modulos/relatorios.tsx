@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { CalendarDays, Search, LayoutList, ClipboardCheck, ArrowRightLeft, FileDown, Flame, Loader2, Sheet, TrendingUp, TrendingDown, Minus, Package, LineChart, Layers } from "lucide-react"
+import { toast } from "react-hot-toast"
 import { useRelatorios } from "@/hooks/useRelatorios"
 import { formatBRL, formatPerc } from "@/lib/utils"
 import { supabase } from "@/lib/supabase"
@@ -17,9 +18,14 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
 
   const carregarHistoricoPrecos = async () => {
     setLoadingHistorico(true)
+    // Janela de 12 meses: evita trazer milhares de linhas após 1-2 anos de uso.
+    const dataLimite = new Date()
+    dataLimite.setMonth(dataLimite.getMonth() - 12)
+    const isoLimite = dataLimite.toISOString().split('T')[0]
     const { data } = await supabase
       .from('compras')
       .select('produto_id, quantidade, valor_unitario, data_compra')
+      .gte('data_compra', isoLimite)
       .order('data_compra', { ascending: true })
 
     if (!data) { setLoadingHistorico(false); return }
@@ -65,34 +71,34 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
   }, [modoVisao])
 
   useEffect(() => {
-    // ── Carrega jsPDF + autoTable ──────────────────────────────────
-    const carregarPDF = () => {
-      // @ts-ignore
-      if (window.jspdf?.jsPDF?.API?.autoTable) { setPdfPronto(true); return }
-      const s1 = document.createElement('script')
-      s1.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
-      s1.async = true
-      document.body.appendChild(s1)
-      s1.onload = () => {
-        const s2 = document.createElement('script')
-        s2.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"
-        s2.async = true
-        document.body.appendChild(s2)
-        s2.onload = () => setPdfPronto(true)
+    // Injeta um <script> só se ainda não existir uma tag com o mesmo src
+    // (evita acumular nós no DOM ao remontar o módulo) e reaproveita a tag
+    // já presente, aguardando seu onload se ainda estiver carregando.
+    const injetarScript = (src: string, onReady: () => void) => {
+      const existente = document.querySelector(`script[src="${src}"]`) as HTMLScriptElement | null
+      if (existente) {
+        if (existente.dataset.carregado === '1') onReady()
+        else existente.addEventListener('load', onReady)
+        return
       }
-    }
-    // ── Carrega ExcelJS ────────────────────────────────────────────
-    const carregarExcel = () => {
-      // @ts-ignore
-      if (window.ExcelJS) { setExcelPronto(true); return }
       const s = document.createElement('script')
-      s.src = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"
+      s.src = src
       s.async = true
+      s.addEventListener('load', () => { s.dataset.carregado = '1'; onReady() })
       document.body.appendChild(s)
-      s.onload = () => setExcelPronto(true)
     }
-    carregarPDF()
-    carregarExcel()
+
+    // ── jsPDF + autoTable (encadeado) ──────────────────────────────
+    // @ts-ignore
+    if (window.jspdf?.jsPDF?.API?.autoTable) setPdfPronto(true)
+    else injetarScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js", () => {
+      injetarScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js", () => setPdfPronto(true))
+    })
+
+    // ── ExcelJS ────────────────────────────────────────────────────
+    // @ts-ignore
+    if (window.ExcelJS) setExcelPronto(true)
+    else injetarScript("https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js", () => setExcelPronto(true))
   }, []);
 
   const nomeEmpresa = (perfil?.empresa?.nome || "Restaurante").toUpperCase()
@@ -568,80 +574,110 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
   const handleGerarPDFFoda = () => {
     try {
       // @ts-ignore
-      const jsPDF = window.jspdf.jsPDF;
-      const doc = new jsPDF('l', 'pt', 'a4');
+      const jsPDF = window.jspdf.jsPDF
+      const doc   = new jsPDF('l', 'pt', 'a4')
+      const W     = doc.internal.pageSize.width
+      const H     = doc.internal.pageSize.height
+      const marca = getCorMarca(perfil?.empresa?.cor_principal)
 
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(22);
-      doc.setTextColor(15, 23, 42);
-      doc.text(nomeEmpresa, 40, 50);
+      const hex2rgb = (hex: string): [number, number, number] => {
+        const h = hex.replace('#', '')
+        return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]
+      }
+      const brandRgb  = hex2rgb(marca.hex500)
+      const brand100  = hex2rgb(marca.hex100)
 
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(12);
-      doc.setTextColor(100, 116, 139);
-      doc.text(`Relatório Gerencial de CMV - ${modoVisao.toUpperCase()}`, 40, 70);
-      doc.text(`Categoria de Auditoria: ${filtroCategoria.toUpperCase()} | Emitido em: ${new Date().toLocaleString('pt-BR')}`, 40, 85);
+      const gerarHeader = (subtitulo: string) => {
+        doc.setFillColor(15, 23, 42)
+        doc.rect(0, 0, W, 54, 'F')
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(18)
+        doc.setTextColor(255, 255, 255)
+        doc.text(nomeEmpresa, 40, 36)
+        doc.setFillColor(...brandRgb)
+        doc.rect(0, 54, W, 4, 'F')
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(10)
+        doc.setTextColor(100, 116, 139)
+        doc.text(subtitulo, 40, 76)
+        doc.setFontSize(8)
+        doc.setTextColor(148, 163, 184)
+        doc.text(`Emitido em ${new Date().toLocaleString('pt-BR')}   |   Margem+ · Sistema de Controle de CMV`, 40, 90)
+        doc.setDrawColor(226, 232, 240)
+        doc.setLineWidth(0.5)
+        doc.line(40, 96, W - 40, 96)
+      }
 
-      doc.setDrawColor(226, 232, 240);
-      doc.setLineWidth(1.5);
-      doc.line(40, 100, doc.internal.pageSize.width - 40, 100);
-
-      const tableConfigPadrao = {
-        startY: 120,
+      const tableConfig: any = {
+        startY: 112,
         theme: 'striped',
-        styles: { fontSize: 10, cellPadding: 8, textColor: [30, 41, 59] },
-        headStyles: { fillColor: [15, 23, 42], textColor: 255, fontStyle: 'bold' },
-        alternateRowStyles: { fillColor: [248, 250, 252] },
-      };
+        styles:             { fontSize: 10, cellPadding: 8, textColor: [30, 41, 59] },
+        headStyles:         { fillColor: brandRgb, textColor: [255, 255, 255], fontStyle: 'bold' },
+        alternateRowStyles: { fillColor: brand100 },
+        didDrawPage: (data: any) => {
+          const pageCount = (doc as any).internal.getNumberOfPages()
+          doc.setFontSize(8)
+          doc.setTextColor(148, 163, 184)
+          doc.text(`${nomeEmpresa}  ·  Margem+`, 40, H - 16)
+          doc.text(`Página ${data.pageNumber} de ${pageCount}`, W - 40, H - 16, { align: 'right' })
+        }
+      }
 
       if (modoVisao === "resumo") {
-        const head = [['Métricas Financeiras do Mês', ...semanasData.map(s => `${s.nome}\n(${s.periodo})`)]]
+        const labelMes = new Date(mesSelecionado + '-15').toLocaleString('pt-BR', { month: 'long', year: 'numeric' })
+        gerarHeader(`Relatório de CMV — ${labelMes}  |  Categoria: ${filtroCategoria}  |  Meta: ${metaCMV}%`)
+
+        const head = [['Métricas Financeiras do Mês', ...semanasData.map(s => `${s.nome} (${s.periodo})`)]]
         const body = [
-          ['Faturamento Global', ...semanasData.map(s => formatBRL(s.faturamento))],
+          ['Faturamento Global',          ...semanasData.map(s => formatBRL(s.faturamento))],
           [`(+) Compras (${filtroCategoria})`, ...semanasData.map(s => formatBRL(s.compras))],
-          ['(-) Deduções / Saídas', ...semanasData.map(s => formatBRL(s.deducoes))],
-          ['(=) CMV LÍQUIDO', ...semanasData.map(s => formatBRL(s.cmvValor))],
-          ['MARGEM CMV REAL (%)', ...semanasData.map(s => formatPerc(s.faturamento > 0 ? (s.cmvValor / s.faturamento) * 100 : 0))]
+          ['(–) Deduções / Saídas',       ...semanasData.map(s => formatBRL(s.deducoes))],
+          ['(=) CMV LÍQUIDO',             ...semanasData.map(s => formatBRL(s.cmvValor))],
+          ['MARGEM CMV REAL (%)',         ...semanasData.map(s => formatPerc(s.faturamento > 0 ? (s.cmvValor / s.faturamento) * 100 : 0))]
         ]
 
         // @ts-ignore
         doc.autoTable({
-          ...tableConfigPadrao,
-          head: head,
-          body: body,
-          columnStyles: {
-            0: { fontStyle: 'bold', cellWidth: 180 },
-            1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' }
+          ...tableConfig,
+          head, body,
+          columnStyles: { 0: { fontStyle: 'bold', cellWidth: 180 }, 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' } },
+          didParseCell: (data: any) => {
+            if (data.section === 'body' && data.row.index === 4 && data.column.index > 0) {
+              const s = semanasData[data.column.index - 1]
+              if (s) {
+                const pct = s.faturamento > 0 ? (s.cmvValor / s.faturamento) * 100 : 0
+                data.cell.styles.textColor = pct > metaCMV ? [185, 28, 28] : [21, 128, 61]
+                data.cell.styles.fontStyle = 'bold'
+              }
+            }
           }
         })
         doc.save(`${slugEmpresa}_CMV_Mensal_${mesSelecionado}.pdf`)
       }
       else if (modoVisao === "detalhado") {
         const semana = semanasData.find(s => s.id === semanaSelecionadaModal)
-        if (!semana) return;
+        if (!semana) return
 
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(37, 99, 235);
-        doc.text(`Auditoria da ${semana.nome} (${semana.periodo})`, 40, 110);
+        gerarHeader(`Auditoria Completa — ${semana.nome} (${semana.periodo})  |  Categoria: ${filtroCategoria}`)
 
-        const head = [['Insumo / Produto', 'Tinha (Inicial)', '+ Comprou', '= Consumiu (CMV)', 'Sobrou (Final)']]
+        const head = [['Insumo / Produto', 'Inicial', '+ Comprou', '= Consumiu (CMV)', 'Sobrou (Final)']]
         const body = semana.consumoDetalhado.map((i: any) => [
           `${i.item} (${i.grupo})`,
-          `${i.qtdIni} ${i.unidade}\n${formatBRL(i.valorIni)}`,
-          `${i.qtdComp} ${i.unidade}\n${formatBRL(i.valorComp)}`,
-          `${i.qtdConsumida} ${i.unidade}\n${i.producao_interna ? 'SUBPRODUTO (R$ 0,00)' : formatBRL(i.valorConsumido)}`,
-          `${i.qtdFin} ${i.unidade}\n${formatBRL(i.valorFinal)}`
+          formatBRL(i.valorIni),
+          formatBRL(i.valorComp),
+          `${i.qtdConsumida} ${i.unidade}  ${i.producao_interna ? '(Subproduto)' : formatBRL(i.valorConsumido)}`,
+          formatBRL(i.valorFinal)
         ])
 
         // @ts-ignore
         doc.autoTable({
-          ...tableConfigPadrao,
-          startY: 125,
-          head: head,
-          body: body,
+          ...tableConfig,
+          head, body,
           columnStyles: {
             0: { fontStyle: 'bold', cellWidth: 200 },
-            1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right', textColor: [225, 29, 72] }, 4: { halign: 'right', textColor: [37, 99, 235] }
+            1: { halign: 'right' }, 2: { halign: 'right' },
+            3: { halign: 'right', textColor: [185, 28, 28] as [number,number,number] },
+            4: { halign: 'right', textColor: [21, 128, 61] as [number,number,number] }
           }
         })
         doc.save(`${slugEmpresa}_Auditoria_${semana.nome.replace(' ', '_')}.pdf`)
@@ -649,52 +685,229 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
       else if (modoVisao === "comparacao") {
         const sem1 = semanasData.find(s => s.id === semanaComp1)
         const sem2 = semanasData.find(s => s.id === semanaComp2)
-        if (!sem1 || !sem2) return;
+        if (!sem1 || !sem2) return
 
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(37, 99, 235);
-        doc.text(`Comparativo de Consumo: ${sem1.nome} vs ${sem2.nome}`, 40, 110);
+        gerarHeader(`Comparativo: ${sem1.nome} (${sem1.periodo})  vs  ${sem2.nome} (${sem2.periodo})`)
 
-        const todosItens = Array.from(new Set([...sem1.consumoDetalhado.map((i:any)=>i.item), ...sem2.consumoDetalhado.map((i:any)=>i.item)])).sort()
+        const todosItens = Array.from(new Set([
+          ...sem1.consumoDetalhado.map((i:any)=>i.item),
+          ...sem2.consumoDetalhado.map((i:any)=>i.item)
+        ])).map((nomeItem: any) => ({
+          nomeItem,
+          i1: sem1.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' },
+          i2: sem2.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' },
+        })).sort((a: any, b: any) => Math.abs(b.i2.valorConsumido - b.i1.valorConsumido) - Math.abs(a.i2.valorConsumido - a.i1.valorConsumido))
 
-        const head = [['Insumo Auditorado', `Custo ${sem1.nome}`, `Custo ${sem2.nome}`, 'Diferença Custo (R$)']]
-        const body = todosItens.map(nomeItem => {
-          const item1 = sem1.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
-          const item2 = sem2.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
-          const diff = item2.valorConsumido - item1.valorConsumido;
-
+        const head = [['Insumo Auditorado', `${sem1.nome} (A)`, `${sem2.nome} (B)`, 'Diferença B − A']]
+        const body = todosItens.map(({ nomeItem, i1, i2 }: any) => {
+          const diff = i2.valorConsumido - i1.valorConsumido
           return [
             String(nomeItem),
-            `${item1.qtdConsumida} ${item1.unidade}  |  ${formatBRL(item1.valorConsumido)}`,
-            `${item2.qtdConsumida} ${item2.unidade}  |  ${formatBRL(item2.valorConsumido)}`,
-            `${diff > 0 ? '+' : ''}${formatBRL(diff)}`
+            `${i1.qtdConsumida} ${i1.unidade}  |  ${formatBRL(i1.valorConsumido)}`,
+            `${i2.qtdConsumida} ${i2.unidade}  |  ${formatBRL(i2.valorConsumido)}`,
+            `${diff > 0 ? '▲ +' : diff < 0 ? '▼ ' : '= '}${formatBRL(Math.abs(diff))}`
           ]
         })
 
         // @ts-ignore
         doc.autoTable({
-          ...tableConfigPadrao,
-          startY: 125,
-          head: head,
-          body: body,
-          columnStyles: {
-            0: { fontStyle: 'bold', cellWidth: 250 },
-            1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right', fontStyle: 'bold' }
-          },
-          // @ts-ignore
-          didParseCell: function(data) {
-             if (data.section === 'body' && data.column.index === 3) {
-                 const diffValue = data.cell.raw.toString();
-                 if (diffValue.startsWith('+')) data.cell.styles.textColor = [225, 29, 72];
-                 else if (diffValue !== 'R$ 0,00') data.cell.styles.textColor = [16, 185, 129];
-             }
+          ...tableConfig,
+          head, body,
+          columnStyles: { 0: { fontStyle: 'bold', cellWidth: 250 }, 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right', fontStyle: 'bold' } },
+          didParseCell: (data: any) => {
+            if (data.section === 'body' && data.column.index === 3) {
+              const v = data.cell.raw?.toString() || ''
+              if (v.startsWith('▲')) data.cell.styles.textColor = [185, 28, 28]
+              else if (v.startsWith('▼')) data.cell.styles.textColor = [21, 128, 61]
+            }
           }
         })
         doc.save(`${slugEmpresa}_Comparativo_${sem1.nome}_vs_${sem2.nome}.pdf`)
       }
+      else if (modoVisao === "precos") {
+        const produtosFiltrados = historicoPrecos.filter((p: any) =>
+          p.nome.toLowerCase().includes(filtroProduto.toLowerCase()))
+        if (produtosFiltrados.length === 0) { toast.error("Nenhum dado de preço para exportar."); return }
+
+        gerarHeader(`Histórico de Preços por Insumo  |  Últimas compras registradas`)
+
+        const head = [['Produto', 'Categoria', 'Data da Compra', 'Qtd', 'Preço Unitário', 'Variação']]
+        const body: any[] = []
+        produtosFiltrados.forEach((p: any) => {
+          const entradas = [...p.entradas].reverse()
+          entradas.forEach((e: any, i: number) => {
+            const precoAnt = entradas[i + 1]?.preco
+            const variacao = precoAnt ? ((e.preco - precoAnt) / precoAnt) * 100 : null
+            body.push([
+              i === 0 ? p.nome : '',
+              i === 0 ? (p.grupo || '—') : '',
+              new Date(e.data + "T12:00:00").toLocaleDateString('pt-BR'),
+              `${e.qtd} ${p.unidade}`,
+              formatBRL(e.preco),
+              variacao === null ? '—' : `${variacao > 0 ? '▲ +' : '▼ '}${variacao.toFixed(1)}%`,
+            ])
+          })
+        })
+
+        // @ts-ignore
+        doc.autoTable({
+          ...tableConfig,
+          head, body,
+          columnStyles: {
+            0: { fontStyle: 'bold', cellWidth: 180 }, 1: { cellWidth: 110 },
+            2: { halign: 'center' }, 3: { halign: 'right' },
+            4: { halign: 'right', fontStyle: 'bold' }, 5: { halign: 'center' },
+          },
+          didParseCell: (data: any) => {
+            if (data.section === 'body' && data.column.index === 5) {
+              const v = data.cell.raw?.toString() || ''
+              if (v.startsWith('▲')) data.cell.styles.textColor = [185, 28, 28]
+              else if (v.startsWith('▼')) data.cell.styles.textColor = [21, 128, 61]
+            }
+          }
+        })
+        doc.save(`${slugEmpresa}_Historico_Precos.pdf`)
+      }
     } catch (error: any) {
-      console.error("Erro absoluto:", error);
-      alert(`Erro no motor de PDF: ${error.message}. Recarregue a página.`);
+      console.error("Erro absoluto:", error)
+      toast.error(`Erro no motor de PDF: ${error.message}. Recarregue a página.`)
+    }
+  }
+
+  const handleRelatorioExecutivo = () => {
+    if (!pdfPronto) return
+    const semana = semanasData.find(s => s.id === semanaSelecionadaModal)
+    if (!semana) return
+
+    try {
+      // @ts-ignore
+      const jsPDF  = window.jspdf.jsPDF
+      const doc    = new jsPDF('p', 'pt', 'a4')
+      const W      = doc.internal.pageSize.width   // 595
+      const H      = doc.internal.pageSize.height  // 842
+      const marca  = getCorMarca(perfil?.empresa?.cor_principal)
+
+      const hex2rgb = (hex: string): [number, number, number] => {
+        const h = hex.replace('#', '')
+        return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]
+      }
+      const brandRgb = hex2rgb(marca.hex500)
+      const brand100 = hex2rgb(marca.hex100)
+
+      const cmvPct    = semana.faturamento > 0 ? (semana.cmvValor / semana.faturamento) * 100 : 0
+      const acimaMeta = cmvPct > metaCMV
+
+      // ── 1. Cabeçalho de marca ──────────────────────────────────────────
+      doc.setFillColor(15, 23, 42)
+      doc.rect(0, 0, W, 64, 'F')
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(20)
+      doc.setTextColor(255, 255, 255)
+      doc.text(nomeEmpresa, 40, 38)
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(10)
+      doc.setTextColor(148, 163, 184)
+      doc.text(`Relatório Executivo Semanal  ·  ${semana.nome} (${semana.periodo})`, 40, 56)
+      doc.setFillColor(...brandRgb)
+      doc.rect(0, 64, W, 5, 'F')
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(8)
+      doc.setTextColor(148, 163, 184)
+      doc.text(`Emitido em ${new Date().toLocaleString('pt-BR')}  |  Margem+ · Sistema de Controle de CMV`, 40, 84)
+
+      // ── 2. 4 KPI cards desenhados ──────────────────────────────────────
+      const cardW = (W - 80 - 30) / 4
+      const cardH = 76
+      const cardY = 100
+      const kpis = [
+        { label: 'FATURAMENTO',  valor: formatBRL(semana.faturamento), sub: 'receita do período',  color: [21, 128, 61]   as [number,number,number], bg: brand100 },
+        { label: 'CMV (R$)',     valor: formatBRL(semana.cmvValor),    sub: 'custo dos insumos',   color: [185, 28, 28]   as [number,number,number], bg: hex2rgb('#FEE2E2') },
+        { label: `CMV (%) · META ${metaCMV}%`, valor: `${cmvPct.toFixed(1)}%`, sub: acimaMeta ? 'acima da meta ▲' : 'dentro da meta ✓',
+          color: (acimaMeta ? [185, 28, 28] : [21, 128, 61]) as [number,number,number],
+          bg:    (acimaMeta ? hex2rgb('#FEE2E2') : hex2rgb('#DCFCE7')) as [number,number,number] },
+        { label: 'COMPRAS',      valor: formatBRL(semana.compras),     sub: 'entradas do período', color: brandRgb,                                  bg: brand100 },
+      ]
+
+      kpis.forEach((kpi, i) => {
+        const x = 40 + i * (cardW + 10)
+        doc.setFillColor(...kpi.bg)
+        doc.roundedRect(x, cardY, cardW, cardH, 6, 6, 'F')
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(7)
+        doc.setTextColor(100, 116, 139)
+        doc.text(kpi.label, x + 10, cardY + 15)
+        doc.setFont("helvetica", "bold")
+        doc.setFontSize(15)
+        doc.setTextColor(...kpi.color)
+        doc.text(kpi.valor, x + 10, cardY + 42)
+        doc.setFont("helvetica", "normal")
+        doc.setFontSize(8)
+        doc.setTextColor(100, 116, 139)
+        doc.text(kpi.sub, x + 10, cardY + 60)
+      })
+
+      // ── 3. Veredito ────────────────────────────────────────────────────
+      const verY  = cardY + cardH + 18
+      const delta = Math.abs(cmvPct - metaCMV).toFixed(1)
+      const veredito = acimaMeta
+        ? `CMV ficou em ${cmvPct.toFixed(1)}% — ${delta} ponto(s) ACIMA da meta de ${metaCMV}%. Revise o consumo dos principais insumos.`
+        : `CMV ficou em ${cmvPct.toFixed(1)}% — ${delta} ponto(s) abaixo da meta de ${metaCMV}%. Resultado dentro do esperado.`
+
+      const bgVer: [number,number,number] = acimaMeta ? [254, 226, 226] : [220, 252, 231]
+      doc.setFillColor(...bgVer)
+      doc.roundedRect(40, verY, W - 80, 34, 4, 4, 'F')
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(10)
+      doc.setTextColor(...(acimaMeta ? [185, 28, 28] : [21, 128, 61]) as [number,number,number])
+      doc.text(veredito, 52, verY + 21, { maxWidth: W - 104 })
+
+      // ── 4. Top 5 insumos ───────────────────────────────────────────────
+      const tableY = verY + 54
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(11)
+      doc.setTextColor(15, 23, 42)
+      doc.text("Top Insumos por Custo no CMV", 40, tableY)
+      doc.setFillColor(...brandRgb)
+      doc.rect(40, tableY + 4, 200, 2, 'F')
+
+      const top5 = semana.consumoDetalhado
+        .filter((i: any) => !i.producao_interna)
+        .slice(0, 5)
+
+      // @ts-ignore
+      doc.autoTable({
+        startY: tableY + 16,
+        theme: 'striped',
+        styles:             { fontSize: 10, cellPadding: 7, textColor: [30, 41, 59] },
+        headStyles:         { fillColor: brandRgb, textColor: [255, 255, 255], fontStyle: 'bold' },
+        alternateRowStyles: { fillColor: brand100 },
+        head: [['Insumo', 'Categoria', 'Consumido', 'Custo CMV', '% do Total']],
+        body: top5.map((i: any) => [
+          i.item,
+          i.grupo,
+          `${i.qtdConsumida} ${i.unidade}`,
+          formatBRL(i.valorConsumido),
+          `${semana.cmvValor > 0 ? ((i.valorConsumido / semana.cmvValor) * 100).toFixed(1) : 0}%`
+        ]),
+        columnStyles: {
+          0: { fontStyle: 'bold', cellWidth: 170 },
+          1: { cellWidth: 100 },
+          2: { halign: 'right', cellWidth: 90 },
+          3: { halign: 'right', fontStyle: 'bold', textColor: [185, 28, 28] as [number,number,number], cellWidth: 110 },
+          4: { halign: 'center', cellWidth: 70 },
+        }
+      })
+
+      // ── 5. Rodapé ─────────────────────────────────────────────────────
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(8)
+      doc.setTextColor(148, 163, 184)
+      doc.text(`${nomeEmpresa}  ·  Margem+  ·  Gerado em ${new Date().toLocaleString('pt-BR')}`, 40, H - 16)
+
+      doc.save(`${slugEmpresa}_Executivo_${semana.nome.replace(' ', '_')}.pdf`)
+    } catch (error: any) {
+      console.error("Erro relatório executivo:", error)
+      toast.error(`Erro ao gerar relatório: ${error.message}`)
     }
   }
 
@@ -886,13 +1099,23 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
                 <ClipboardCheck className="w-4 h-4" style={{ color: T.margem }} /> Auditoria Completa
               </p>
             </div>
-            <select
-              className="p-3 rounded-xl text-sm font-semibold outline-none cursor-pointer"
-              style={{ border: `1px solid ${T.stone200}`, background: 'white', color: T.ink }}
-              value={semanaSelecionadaModal} onChange={e => setSemanaSelecionadaModal(e.target.value)}
-            >
-              {semanasData.map(s => <option key={s.id} value={s.id}>{s.nome} ({s.periodo})</option>)}
-            </select>
+            <div className="flex items-center gap-3">
+              <select
+                className="p-3 rounded-xl text-sm font-semibold outline-none cursor-pointer"
+                style={{ border: `1px solid ${T.stone200}`, background: 'white', color: T.ink }}
+                value={semanaSelecionadaModal} onChange={e => setSemanaSelecionadaModal(e.target.value)}
+              >
+                {semanasData.map(s => <option key={s.id} value={s.id}>{s.nome} ({s.periodo})</option>)}
+              </select>
+              <button
+                onClick={handleRelatorioExecutivo}
+                disabled={!pdfPronto || !semanaSelecionadaModal}
+                className="px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                style={pdfPronto && semanaSelecionadaModal ? { background: T.ink, color: T.paper } : { background: T.paper2, color: T.stone400 }}
+              >
+                <FileDown className="w-4 h-4" /> Relatório Executivo
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 p-6 space-y-4" style={{ background: T.paper + '88' }}>
@@ -990,53 +1213,112 @@ export function Relatorios({ produtos, perfil }: { produtos: any[], perfil: any 
             </div>
           </div>
 
-          {dComp1 && dComp2 && (
-            <div className="bg-white rounded-xl overflow-hidden" style={{ border: `1px solid ${T.stone200}` }}>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead style={{ background: T.paper2, borderBottom: `1px solid ${T.stone200}` }}>
-                    <tr>
-                      <th className="p-5 text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Insumo / Produto</th>
-                      <th className="p-5 text-[12px] font-semibold uppercase text-center" style={{ color: T.stone400, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}` }}>{dComp1.nome}</th>
-                      <th className="p-5 text-[12px] font-semibold uppercase text-center" style={{ color: T.stone400, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}` }}>{dComp2.nome}</th>
-                      <th className="p-5 text-[12px] font-semibold uppercase text-right" style={{ color: T.margem, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}`, background: T.margemSoft + '55' }}>Diferença Custo (B - A)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Array.from(new Set([...dComp1.consumoDetalhado.map((i:any)=>i.item), ...dComp2.consumoDetalhado.map((i:any)=>i.item)])).sort().map((nomeItem: any, idx) => {
-                      const item1 = dComp1.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
-                      const item2 = dComp2.consumoDetalhado.find((i:any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
-                      const diff = item2.valorConsumido - item1.valorConsumido;
-                      return (
-                        <tr
-                          key={idx}
-                          className="transition-colors"
-                          style={{ borderBottom: `1px solid ${T.stone200}` }}
-                          onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = T.paper2}
-                          onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-                        >
-                          <td className="p-4 font-semibold" style={{ color: T.ink }}>{nomeItem}</td>
-                          <td className="p-4 text-center" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.paper2 + '55' }}>
-                            <span className="block font-semibold" style={{ color: T.ink }}>{item1.qtdConsumida} {item1.unidade}</span>
-                            <span className="block text-[12px]" style={{ color: T.stone400 }}>{formatBRL(item1.valorConsumido)}</span>
-                          </td>
-                          <td className="p-4 text-center" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.paper2 + '55' }}>
-                            <span className="block font-semibold" style={{ color: T.ink }}>{item2.qtdConsumida} {item2.unidade}</span>
-                            <span className="block text-[12px]" style={{ color: T.stone400 }}>{formatBRL(item2.valorConsumido)}</span>
-                          </td>
-                          <td className="p-4 text-right" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.margemSoft + '22' }}>
-                            <span className={`font-semibold text-lg ${diff > 0 ? 'text-red-500' : diff < 0 ? 'text-emerald-600' : ''}`} style={diff === 0 ? { color: T.stone400 } : {}}>
-                              {diff > 0 ? '+' : ''}{formatBRL(diff)}
+          {dComp1 && dComp2 && (() => {
+            const cmvPct1 = dComp1.faturamento > 0 ? (dComp1.cmvValor / dComp1.faturamento) * 100 : 0
+            const cmvPct2 = dComp2.faturamento > 0 ? (dComp2.cmvValor / dComp2.faturamento) * 100 : 0
+
+            const itensComDiff = Array.from(new Set([
+              ...dComp1.consumoDetalhado.map((i: any) => i.item),
+              ...dComp2.consumoDetalhado.map((i: any) => i.item),
+            ])).map((nomeItem: any) => {
+              const item1 = dComp1.consumoDetalhado.find((i: any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
+              const item2 = dComp2.consumoDetalhado.find((i: any) => i.item === nomeItem) || { qtdConsumida: 0, valorConsumido: 0, unidade: '' }
+              return { nomeItem, item1, item2, diff: item2.valorConsumido - item1.valorConsumido }
+            }).sort((a: any, b: any) => Math.abs(b.diff) - Math.abs(a.diff))
+
+            const totalA    = itensComDiff.reduce((s: number, i: any) => s + i.item1.valorConsumido, 0)
+            const totalB    = itensComDiff.reduce((s: number, i: any) => s + i.item2.valorConsumido, 0)
+            const totalDiff = totalB - totalA
+
+            const kpis = [
+              { label: 'Faturamento',       a: dComp1.faturamento, b: dComp2.faturamento, fmt: formatBRL,          goodWhen: 'higher' as const },
+              { label: 'CMV (R$)',           a: dComp1.cmvValor,    b: dComp2.cmvValor,    fmt: formatBRL,          goodWhen: 'lower'  as const },
+              { label: `CMV (%) · meta ${metaCMV}%`, a: cmvPct1,   b: cmvPct2,            fmt: (v: number) => `${v.toFixed(1)}%`, goodWhen: 'lower' as const },
+              { label: 'Compras do Período', a: dComp1.compras,     b: dComp2.compras,     fmt: formatBRL,          goodWhen: 'lower'  as const },
+            ]
+
+            return (
+              <>
+                {/* KPI cards A vs B */}
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+                  {kpis.map(kpi => {
+                    const delta     = kpi.b - kpi.a
+                    const isNeutral = Math.abs(delta) < 0.01
+                    const isGood    = kpi.goodWhen === 'higher' ? delta >= 0 : delta <= 0
+                    const deltaColor = isNeutral ? T.stone400 : isGood ? '#15803D' : '#B91C1C'
+                    const deltaBg    = isNeutral ? T.paper2   : isGood ? '#DCFCE7' : '#FEE2E2'
+                    return (
+                      <div key={kpi.label} className="flex flex-col gap-3 p-5 bg-white rounded-xl" style={{ border: `1px solid ${T.stone200}` }}>
+                        <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: T.stone400 }}>{kpi.label}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="space-y-0.5">
+                            <p className="text-[12px]" style={{ color: T.stone400 }}>A <span className="font-semibold" style={{ color: T.stone600 }}>{kpi.fmt(kpi.a)}</span></p>
+                            <p className="text-[12px]" style={{ color: T.stone400 }}>B <span className="text-base font-bold" style={{ color: T.ink }}>{kpi.fmt(kpi.b)}</span></p>
+                          </div>
+                          {!isNeutral && (
+                            <span className="text-xs font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap" style={{ color: deltaColor, background: deltaBg }}>
+                              {delta > 0 ? '▲' : '▼'} {kpi.fmt(Math.abs(delta))}
                             </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Tabela ordenada por maior variação */}
+                <div className="bg-white rounded-xl overflow-hidden" style={{ border: `1px solid ${T.stone200}` }}>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                      <thead style={{ background: T.paper2, borderBottom: `1px solid ${T.stone200}` }}>
+                        <tr>
+                          <th className="p-5 text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Insumo / Produto</th>
+                          <th className="p-5 text-[12px] font-semibold uppercase text-center" style={{ color: T.stone400, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}` }}>{dComp1.nome}</th>
+                          <th className="p-5 text-[12px] font-semibold uppercase text-center" style={{ color: T.stone400, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}` }}>{dComp2.nome}</th>
+                          <th className="p-5 text-[12px] font-semibold uppercase text-right" style={{ color: T.margem, letterSpacing: '0.08em', borderLeft: `1px solid ${T.stone200}`, background: T.margemSoft + '55' }}>Diferença Custo (B − A)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {itensComDiff.map(({ nomeItem, item1, item2, diff }: any, idx: number) => (
+                          <tr
+                            key={idx}
+                            className="transition-colors"
+                            style={{ borderBottom: `1px solid ${T.stone200}` }}
+                            onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = T.paper2}
+                            onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                          >
+                            <td className="p-4 font-semibold" style={{ color: T.ink }}>{nomeItem}</td>
+                            <td className="p-4 text-center" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.paper2 + '55' }}>
+                              <span className="block font-semibold" style={{ color: T.ink }}>{item1.qtdConsumida} {item1.unidade}</span>
+                              <span className="block text-[12px]" style={{ color: T.stone400 }}>{formatBRL(item1.valorConsumido)}</span>
+                            </td>
+                            <td className="p-4 text-center" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.paper2 + '55' }}>
+                              <span className="block font-semibold" style={{ color: T.ink }}>{item2.qtdConsumida} {item2.unidade}</span>
+                              <span className="block text-[12px]" style={{ color: T.stone400 }}>{formatBRL(item2.valorConsumido)}</span>
+                            </td>
+                            <td className="p-4 text-right" style={{ borderLeft: `1px solid ${T.stone200}`, background: T.margemSoft + '22' }}>
+                              <span className={`font-semibold text-lg ${diff > 0 ? 'text-red-500' : diff < 0 ? 'text-emerald-600' : ''}`} style={diff === 0 ? { color: T.stone400 } : {}}>
+                                {diff > 0 ? '+' : ''}{formatBRL(diff)}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr style={{ background: T.ink }}>
+                          <td colSpan={2} className="p-4 font-bold text-sm" style={{ color: 'white' }}>Total do Período</td>
+                          <td className="p-4 text-center font-semibold text-sm" style={{ color: '#CBD5E1', borderLeft: '1px solid #1E293B' }}>{formatBRL(totalB)}</td>
+                          <td className="p-4 text-right font-bold text-sm" style={{ color: totalDiff > 0 ? '#FCA5A5' : totalDiff < 0 ? '#6EE7B7' : '#94A3B8', borderLeft: '1px solid #1E293B' }}>
+                            {totalDiff > 0 ? '+' : ''}{formatBRL(totalDiff)}
                           </td>
                         </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
         </div>
       )}
 

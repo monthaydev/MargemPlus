@@ -21,10 +21,12 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
   const [nome, setNome] = useState("")
   const [unidade, setUnidade] = useState(unidadesEmpresa[0] || "KG")
   const [grupo, setGrupo] = useState("")
+  const [rendimento, setRendimento] = useState("100")
   const [producaoInterna, setProducaoInterna] = useState(false)
   const [busca, setBusca] = useState("")
   const [editandoId, setEditandoId] = useState<number | null>(null)
   const [salvando, setSalvando] = useState(false)
+  const [produtoParaExcluir, setProdutoParaExcluir] = useState<number | null>(null)
 
   const [novaCategoria, setNovaCategoria] = useState("")
   const [novaUnidade, setNovaUnidade] = useState("")
@@ -38,8 +40,11 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
     if (!grupo) return toast.error("Selecione a categoria do produto!")
     if (!perfil?.empresa_id) return toast.error("Sessão inválida. Recarregue a página.")
 
+    // Yield Factor: respeita o CHECK do banco (> 0 e <= 100)
+    const rend = Math.min(100, Math.max(1, parseFloat(rendimento.replace(',', '.')) || 100))
+
     setSalvando(true)
-    const dados = { nome: nome.trim(), unidade, grupo, producao_interna: producaoInterna }
+    const dados = { nome: nome.trim(), unidade, grupo, producao_interna: producaoInterna, rendimento: rend }
 
     const { error } = editandoId
       ? await supabase.from('produtos').update(dados).eq('id', editandoId)
@@ -49,7 +54,7 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
     if (error) return toast.error("Erro ao salvar produto.")
 
     toast.success(editandoId ? "Produto atualizado!" : "Produto cadastrado!")
-    setNome(""); setGrupo(""); setProducaoInterna(false); setEditandoId(null)
+    setNome(""); setGrupo(""); setRendimento("100"); setProducaoInterna(false); setEditandoId(null)
     onRefresh()
   }
 
@@ -58,17 +63,19 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
     setNome(p.nome)
     setUnidade(p.unidade)
     setGrupo(p.grupo || "")
+    setRendimento(String(p.rendimento ?? 100))
     setProducaoInterna(p.producao_interna)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const cancelarEdicao = () => {
     setEditandoId(null)
-    setNome(""); setGrupo(""); setProducaoInterna(false)
+    setNome(""); setGrupo(""); setRendimento("100"); setProducaoInterna(false)
   }
 
   const handleExcluirProduto = async (id: number) => {
-    if (!confirm("Tem certeza que deseja excluir este produto?")) return
+    if (produtoParaExcluir !== id) { setProdutoParaExcluir(id); return }
+    setProdutoParaExcluir(null)
     const { error } = await supabase.from('produtos').delete().eq('id', id)
     if (error) return toast.error("Erro ao excluir produto.")
     toast.success("Produto removido!")
@@ -199,6 +206,25 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
+                  <Beaker className="w-3.5 h-3.5" style={{ color: T.margem }} /> Rendimento líquido (%)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number" min="1" max="100" value={rendimento}
+                    onChange={e => setRendimento(e.target.value)}
+                    className="w-full p-3.5 pr-9 rounded-xl outline-none text-sm font-medium transition-colors"
+                    style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
+                    placeholder="100"
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 font-semibold text-sm" style={{ color: T.stone400 }}>%</span>
+                </div>
+                <p className="text-[12px] font-medium" style={{ color: T.stone400 }}>
+                  Aproveitamento após limpeza/preparo. Ex: carne com 30% de perda → informe <strong>70%</strong>. Use 100% se não há perda.
+                </p>
+              </div>
+
               <label
                 className="flex items-center gap-3 p-4 rounded-xl cursor-pointer transition-colors"
                 style={{ border: `1px solid ${T.stone200}`, background: T.paper2 }}
@@ -295,6 +321,11 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
                             Fabricado
                           </span>
                         )}
+                        {(p.rendimento ?? 100) < 100 && (
+                          <span className="ml-2 text-[9px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                            rend. {p.rendimento}%
+                          </span>
+                        )}
                       </td>
                       <td className="py-4 px-5">
                         <span className="px-2 py-1 rounded-md text-[12px] font-semibold uppercase" style={{ background: T.paper2, color: T.stone500 }}>
@@ -303,14 +334,31 @@ export function Cadastros({ produtos, onRefresh, onPerfilRefresh, isReadOnly, pe
                       </td>
                       <td className="py-4 px-5 text-center font-semibold" style={{ color: T.stone400 }}>{p.unidade}</td>
                       <td className="py-4 px-5 text-right">
-                        <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button onClick={() => iniciarEdicao(p)} className="p-2 rounded-lg transition-colors" style={{ color: T.margem }} onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = T.margemSoft} onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          <button onClick={() => handleExcluirProduto(p.id)} className="p-2 rounded-lg transition-colors text-red-600" onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#FEF2F2'} onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                        {produtoParaExcluir === p.id ? (
+                          <div className="flex justify-end items-center gap-1.5">
+                            <button onClick={() => handleExcluirProduto(p.id)}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                              style={{ background: '#FEE2E2', color: '#B91C1C' }}>
+                              Excluir
+                            </button>
+                            <button onClick={() => setProdutoParaExcluir(null)}
+                              className="p-1.5 rounded-lg transition-colors"
+                              style={{ color: T.stone400 }}
+                              onMouseEnter={e => (e.currentTarget as HTMLElement).style.color = T.ink}
+                              onMouseLeave={e => (e.currentTarget as HTMLElement).style.color = T.stone400}>
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => iniciarEdicao(p)} className="p-2 rounded-lg transition-colors" style={{ color: T.margem }} onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = T.margemSoft} onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => handleExcluirProduto(p.id)} className="p-2 rounded-lg transition-colors text-red-600" onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#FEF2F2'} onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}

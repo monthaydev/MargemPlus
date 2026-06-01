@@ -76,6 +76,8 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
   const [formCustoFixoPorcao, setFormCustoFixoPorcao] = useState("0")
 
   const [showCalculadora, setShowCalculadora] = useState(false)
+  const [showDetalhes, setShowDetalhes] = useState(false)
+  const [fichaParaExcluir, setFichaParaExcluir] = useState<string | null>(null)
   const [calcCustoMensal, setCalcCustoMensal] = useState("")
   const [calcQtdMensal, setCalcQtdMensal] = useState("")
 
@@ -192,14 +194,15 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
     setFormPorcoes("1")
     setFormMargem("30"); setFormImpostos(String(perfil?.empresa?.imposto_padrao_pct ?? 0)); setFormCanalId("")
     setFormEmbalagem("0"); setFormCustoFixoPorcao("0")
-    setShowCalculadora(false); setCalcCustoMensal(""); setCalcQtdMensal("")
+    setShowCalculadora(false); setShowDetalhes(false); setCalcCustoMensal(""); setCalcQtdMensal("")
     setFormModoPreparo(""); setFormTempoPreparo("")
     setAbaAtiva("receita")
   }
 
-  const abrirNova = () => { setFichaEditando(null); setIsNova(true); resetForm() }
+  const abrirNova = () => { setFichaEditando(null); setIsNova(true); setFichaParaExcluir(null); resetForm() }
 
   const abrirEdicao = (f: Ficha) => {
+    setFichaParaExcluir(null)
     setFichaEditando(f); setIsNova(false)
     setFormNome(f.nome); setFormCategoria(f.categoria)
     setFormPrecoVenda(f.preco_venda ? f.preco_venda.toFixed(2) : "")
@@ -281,13 +284,26 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
           .eq("id", fichaEditando!.id)
         if (error) throw error
         fichaId = fichaEditando!.id
-        await supabase.from("ficha_ingredientes").delete().eq("ficha_id", fichaId)
       }
 
-      const ings = formIngredientes.map(i => ({ ficha_id: fichaId, produto_id: i.produto_id, quantidade: i.quantidade }))
-      if (ings.length > 0) {
-        const { error: ingErr } = await supabase.from("ficha_ingredientes").insert(ings)
-        if (ingErr) throw ingErr
+      // RPC transacional: delete + insert dos ingredientes numa só transação
+      // (impede que a ficha fique sem ingredientes se um passo falhar).
+      const itens = formIngredientes.map(i => ({ produto_id: i.produto_id, quantidade: i.quantidade }))
+      const { data: result, error: rpcErr } = await supabase.rpc('salvar_ficha_ingredientes', {
+        p_ficha_id: fichaId,
+        p_itens: itens,
+      })
+      if (rpcErr) {
+        // Fallback: se a migração ainda não foi aplicada no Supabase, usa o método clássico
+        const semFuncao = rpcErr.code === 'PGRST202' || /could not find the function|does not exist/i.test(rpcErr.message || '')
+        if (!semFuncao) throw rpcErr
+        if (!isNova) await supabase.from("ficha_ingredientes").delete().eq("ficha_id", fichaId)
+        if (itens.length > 0) {
+          const { error: ingErr } = await supabase.from("ficha_ingredientes").insert(itens.map(i => ({ ficha_id: fichaId, ...i })))
+          if (ingErr) throw ingErr
+        }
+      } else if (!result?.ok) {
+        throw new Error((result as any)?.erro || "Falha ao salvar ingredientes.")
       }
 
       toast.success(isNova ? "Ficha criada!" : "Ficha atualizada!")
@@ -301,7 +317,8 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
   }
 
   const handleExcluir = async (f: Ficha) => {
-    if (!confirm(`Excluir "${f.nome}"? Esta ação não pode ser desfeita.`)) return
+    if (fichaParaExcluir !== f.id) { setFichaParaExcluir(f.id); return }
+    setFichaParaExcluir(null)
     const { error } = await supabase.from("fichas_tecnicas").delete().eq("id", f.id)
     if (error) return toast.error("Erro ao excluir ficha.")
     toast.success("Ficha excluída!")
@@ -336,6 +353,20 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
   const precoSugerido = formIngredientes.length > 0
     ? calcularPrecoSugerido(custoBasePrec, margemDesejadaNum, taxaCanal, impostosNum)
     : null
+
+  // Divisor da fórmula Markup Divisor: 1 − (impostos% + canal% + margem%)
+  const divisorMarkup = 1 - totalPercentual / 100
+  // Composição do preço de venda (= 100% do preço). Fonte única para barra, legenda e lista.
+  const composicaoPreco = precoSugerido && precoSugerido > 0
+    ? [
+        { label: "Ingredientes", valor: custoPorPorcaoForm, cor: T.warning, destaque: false },
+        { label: "Embalagem", valor: embalagemNum, cor: T.info, destaque: false },
+        { label: "Custo Fixo", valor: custoFixoPorcaoNum, cor: T.stone500, destaque: false },
+        { label: canalSelecionado?.nome ?? "Canal", valor: (precoSugerido * taxaCanal) / 100, cor: T.stone400, destaque: false },
+        { label: "Impostos", valor: (precoSugerido * impostosNum) / 100, cor: T.negative, destaque: false },
+        { label: "Lucro", valor: (precoSugerido * margemDesejadaNum) / 100, cor: T.margem, destaque: true },
+      ].filter(c => c.valor > 0)
+    : []
 
   const custoMensalNum = parseFloat(calcCustoMensal.replace(",", ".")) || 0
   const qtdMensalNum = parseFloat(calcQtdMensal.replace(",", ".")) || 0
@@ -483,12 +514,31 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
                           </>
                         )}
                         {!isReadOnly && (
-                          <button
-                            onClick={e => { e.stopPropagation(); handleExcluir(ficha) }}
-                            className="p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 hover:bg-red-50"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          fichaParaExcluir === ficha.id ? (
+                            <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                              <button
+                                onClick={e => { e.stopPropagation(); handleExcluir(ficha) }}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                                style={{ background: '#FEE2E2', color: '#B91C1C' }}>
+                                Excluir
+                              </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); setFichaParaExcluir(null) }}
+                                className="p-1.5 rounded-lg transition-all"
+                                style={{ color: T.stone400 }}
+                                onMouseEnter={e => ((e.currentTarget as HTMLElement).style.color = T.ink)}
+                                onMouseLeave={e => ((e.currentTarget as HTMLElement).style.color = T.stone400)}>
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={e => { e.stopPropagation(); handleExcluir(ficha) }}
+                              className="p-1.5 rounded-lg transition-all opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )
                         )}
                       </div>
                     </div>
@@ -768,158 +818,167 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
                       </div>
                     </div>
 
-                    <div className="space-y-4">
+                    <div className="space-y-3">
 
-                      {/* Embalagem */}
-                      <div className="space-y-1.5">
-                        <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
-                          <ShoppingBag className="w-3 h-3" /> Embalagem (R$/porção)
-                        </label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>R$</span>
-                          <input
-                            type="text" value={formEmbalagem} onChange={e => setFormEmbalagem(e.target.value)}
-                            placeholder="0,00"
-                            className="w-full p-3 pl-8 rounded-xl font-medium outline-none text-sm transition-all"
-                            style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
-                          />
-                        </div>
-                        <p className="text-[12px] font-medium" style={{ color: T.stone400 }}>Caixa, saco, bandeja, etc.</p>
-                      </div>
-
-                      {/* Custo fixo */}
-                      <div className="space-y-2">
-                        <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
-                          <Building2 className="w-3 h-3" /> Custo Fixo (R$/porção)
-                        </label>
-
-                        <div className="flex gap-2">
-                          <div className="relative flex-1">
+                      {/* Linha 1: Embalagem · Custo Fixo */}
+                      <div className="grid grid-cols-2 gap-3 items-start">
+                        {/* Embalagem */}
+                        <div className="space-y-1.5">
+                          <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
+                            <ShoppingBag className="w-3 h-3" /> Embalagem
+                          </label>
+                          <div className="relative">
                             <span className="absolute left-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>R$</span>
                             <input
-                              type="text" value={formCustoFixoPorcao} onChange={e => setFormCustoFixoPorcao(e.target.value)}
+                              type="text" value={formEmbalagem} onChange={e => setFormEmbalagem(e.target.value)}
                               placeholder="0,00"
                               className="w-full p-3 pl-8 rounded-xl font-medium outline-none text-sm transition-all"
                               style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
                             />
                           </div>
-                          <button
-                            onClick={() => setShowCalculadora(!showCalculadora)}
-                            className="flex items-center gap-1.5 px-3 py-2 rounded-xl font-semibold text-xs border transition-all"
-                            style={showCalculadora
-                              ? { background: T.ink, color: T.paper, borderColor: T.ink }
-                              : { background: 'white', color: T.stone600, borderColor: T.stone200 }
-                            }
-                          >
-                            <Calculator className="w-3.5 h-3.5" />
-                            {showCalculadora ? "Fechar" : "Calcular"}
-                            {showCalculadora ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                          </button>
                         </div>
 
-                        <p className="text-[12px] font-medium" style={{ color: T.stone400 }}>
-                          Aluguel, salários, contas e outros fixos rateados por porção.{" "}
-                          {!showCalculadora && (
-                            <button onClick={() => setShowCalculadora(true)} className="font-semibold underline" style={{ color: T.margem }}>
-                              Não sei o valor — calcular agora
-                            </button>
-                          )}
-                        </p>
-
-                        {/* Calculadora */}
-                        {showCalculadora && (
-                          <div className="rounded-xl p-4 space-y-4" style={{ background: T.paper2, border: `1px solid ${T.stone200}` }}>
-                            <div className="flex items-start gap-2">
-                              <div className="p-1 rounded-lg mt-0.5 flex-shrink-0" style={{ background: T.ink }}>
-                                <Zap className="w-3.5 h-3.5" style={{ color: T.paper }} />
-                              </div>
-                              <div>
-                                <p className="text-sm font-semibold" style={{ color: T.ink }}>Calculadora de Custo Fixo</p>
-                                <p className="text-xs mt-0.5" style={{ color: T.stone400 }}>Informe seus custos mensais — calculamos o valor por prato automaticamente.</p>
-                              </div>
+                        {/* Custo fixo */}
+                        <div className="space-y-1.5">
+                          <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
+                            <Building2 className="w-3 h-3" /> Custo Fixo
+                          </label>
+                          <div className="flex gap-1.5">
+                            <div className="relative flex-1">
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>R$</span>
+                              <input
+                                type="text" value={formCustoFixoPorcao} onChange={e => setFormCustoFixoPorcao(e.target.value)}
+                                placeholder="0,00"
+                                className="w-full p-3 pl-8 rounded-xl font-medium outline-none text-sm transition-all"
+                                style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
+                              />
                             </div>
-
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="space-y-1.5">
-                                <label className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Total fixo/mês (R$)</label>
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>R$</span>
-                                  <input
-                                    type="text"
-                                    value={calcCustoMensal}
-                                    onChange={e => setCalcCustoMensal(e.target.value)}
-                                    placeholder="5.000,00"
-                                    className="w-full p-3 pl-8 bg-white rounded-xl font-medium text-sm outline-none transition-all"
-                                    style={{ border: `1px solid ${T.stone200}`, color: T.ink }}
-                                  />
-                                </div>
-                                <p className="text-[9px] font-medium" style={{ color: T.stone400 }}>Aluguel + salários + contas</p>
-                              </div>
-                              <div className="space-y-1.5">
-                                <label className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Pratos/mês</label>
-                                <input
-                                  type="text"
-                                  value={calcQtdMensal}
-                                  onChange={e => setCalcQtdMensal(e.target.value)}
-                                  placeholder="300"
-                                  className="w-full p-3 bg-white rounded-xl font-medium text-sm outline-none text-center transition-all"
-                                  style={{ border: `1px solid ${T.stone200}`, color: T.ink }}
-                                />
-                                <p className="text-[9px] font-medium" style={{ color: T.stone400 }}>Quantos pratos vende por mês?</p>
-                              </div>
-                            </div>
-
-                            {custoCalculadoPorPorcao > 0 && (
-                              <div className="bg-white rounded-xl p-3" style={{ border: `1px solid ${T.stone200}` }}>
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <p className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Custo fixo por porção</p>
-                                    <p className="text-2xl font-light font-serif" style={{ color: T.margem }}>{formatBRL(custoCalculadoPorPorcao)}</p>
-                                  </div>
-                                  <div className="text-right text-[12px] font-medium" style={{ color: T.stone400 }}>
-                                    <p>{formatBRL(custoMensalNum)}</p>
-                                    <p>÷ {qtdMensalNum} pratos</p>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
                             <button
-                              onClick={aplicarCustoCalculado}
-                              disabled={custoCalculadoPorPorcao <= 0}
-                              className="w-full py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40"
-                              style={{ background: T.ink, color: T.paper }}
-                              onMouseEnter={e => custoCalculadoPorPorcao > 0 && ((e.currentTarget as HTMLElement).style.opacity = '0.88')}
-                              onMouseLeave={e => ((e.currentTarget as HTMLElement).style.opacity = '1')}
-                            >
-                              <CheckCircle2 className="w-4 h-4" />
-                              {custoCalculadoPorPorcao > 0
-                                ? `Aplicar ${formatBRL(custoCalculadoPorPorcao)}/porção`
-                                : "Preencha os campos acima"
+                              onClick={() => setShowCalculadora(!showCalculadora)}
+                              title="Calcular custo fixo por porção"
+                              className="px-3 rounded-xl border transition-all flex items-center justify-center flex-shrink-0"
+                              style={showCalculadora
+                                ? { background: T.ink, color: T.paper, borderColor: T.ink }
+                                : { background: 'white', color: T.stone600, borderColor: T.stone200 }
                               }
+                            >
+                              <Calculator className="w-4 h-4" />
                             </button>
                           </div>
-                        )}
-                      </div>
-
-                      {/* Impostos */}
-                      <div className="space-y-1.5">
-                        <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
-                          <Percent className="w-3 h-3 text-red-400" /> Impostos (DAS / Simples / ISS)
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text" value={formImpostos} onChange={e => setFormImpostos(e.target.value)}
-                            placeholder="0"
-                            className="w-full p-3 pr-8 rounded-xl font-medium outline-none text-sm transition-all"
-                            style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
-                          />
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>%</span>
                         </div>
-                        <p className="text-[12px] font-medium" style={{ color: T.stone400 }}>Simples Nacional restaurante: geralmente 4–15% da receita bruta.</p>
                       </div>
 
-                      {/* Canal de Venda */}
+                      {/* Calculadora de custo fixo — largura total */}
+                      {showCalculadora && (
+                        <div className="rounded-xl p-4 space-y-4" style={{ background: T.paper2, border: `1px solid ${T.stone200}` }}>
+                          <div className="flex items-start gap-2">
+                            <div className="p-1 rounded-lg mt-0.5 flex-shrink-0" style={{ background: T.ink }}>
+                              <Zap className="w-3.5 h-3.5" style={{ color: T.paper }} />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold" style={{ color: T.ink }}>Calculadora de Custo Fixo</p>
+                              <p className="text-xs mt-0.5" style={{ color: T.stone400 }}>Informe seus custos mensais — calculamos o valor por prato automaticamente.</p>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <label className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Total fixo/mês (R$)</label>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>R$</span>
+                                <input
+                                  type="text"
+                                  value={calcCustoMensal}
+                                  onChange={e => setCalcCustoMensal(e.target.value)}
+                                  placeholder="5.000,00"
+                                  className="w-full p-3 pl-8 bg-white rounded-xl font-medium text-sm outline-none transition-all"
+                                  style={{ border: `1px solid ${T.stone200}`, color: T.ink }}
+                                />
+                              </div>
+                              <p className="text-[9px] font-medium" style={{ color: T.stone400 }}>Aluguel + salários + contas</p>
+                            </div>
+                            <div className="space-y-1.5">
+                              <label className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Pratos/mês</label>
+                              <input
+                                type="text"
+                                value={calcQtdMensal}
+                                onChange={e => setCalcQtdMensal(e.target.value)}
+                                placeholder="300"
+                                className="w-full p-3 bg-white rounded-xl font-medium text-sm outline-none text-center transition-all"
+                                style={{ border: `1px solid ${T.stone200}`, color: T.ink }}
+                              />
+                              <p className="text-[9px] font-medium" style={{ color: T.stone400 }}>Quantos pratos vende por mês?</p>
+                            </div>
+                          </div>
+
+                          {custoCalculadoPorPorcao > 0 && (
+                            <div className="bg-white rounded-xl p-3" style={{ border: `1px solid ${T.stone200}` }}>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="text-[12px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.08em' }}>Custo fixo por porção</p>
+                                  <p className="text-2xl font-light font-serif" style={{ color: T.margem }}>{formatBRL(custoCalculadoPorPorcao)}</p>
+                                </div>
+                                <div className="text-right text-[12px] font-medium" style={{ color: T.stone400 }}>
+                                  <p>{formatBRL(custoMensalNum)}</p>
+                                  <p>÷ {qtdMensalNum} pratos</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          <button
+                            onClick={aplicarCustoCalculado}
+                            disabled={custoCalculadoPorPorcao <= 0}
+                            className="w-full py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40"
+                            style={{ background: T.ink, color: T.paper }}
+                            onMouseEnter={e => custoCalculadoPorPorcao > 0 && ((e.currentTarget as HTMLElement).style.opacity = '0.88')}
+                            onMouseLeave={e => ((e.currentTarget as HTMLElement).style.opacity = '1')}
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                            {custoCalculadoPorPorcao > 0
+                              ? `Aplicar ${formatBRL(custoCalculadoPorPorcao)}/porção`
+                              : "Preencha os campos acima"
+                            }
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Linha 2: Impostos · Margem */}
+                      <div className="grid grid-cols-2 gap-3 items-start">
+                        {/* Impostos */}
+                        <div className="space-y-1.5">
+                          <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
+                            <Percent className="w-3 h-3 text-red-400" /> Impostos
+                          </label>
+                          <div className="relative">
+                            <input
+                              type="text" value={formImpostos} onChange={e => setFormImpostos(e.target.value)}
+                              placeholder="0"
+                              className="w-full p-3 pr-8 rounded-xl font-medium outline-none text-sm transition-all"
+                              style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
+                            />
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>%</span>
+                          </div>
+                        </div>
+
+                        {/* Margem */}
+                        <div className="space-y-1.5">
+                          <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
+                            <TrendingUp className="w-3 h-3 text-emerald-500" /> Margem
+                          </label>
+                          <div className="relative">
+                            <input
+                              type="text" value={formMargem} onChange={e => setFormMargem(e.target.value)}
+                              placeholder="30"
+                              className="w-full p-3 pr-8 rounded-xl font-medium outline-none text-sm transition-all"
+                              style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
+                            />
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>%</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Canal de Venda — largura total */}
                       <div className="space-y-1.5">
                         <label className="text-[12px] font-semibold uppercase flex items-center gap-1.5" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
                           <Tag className="w-3 h-3" style={{ color: T.margem }} /> Canal de Venda
@@ -941,42 +1000,6 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
                           </p>
                         )}
                       </div>
-
-                      {/* Margem */}
-                      <div className="space-y-1.5">
-                        <label className="text-[12px] font-semibold uppercase flex items-center gap-1" style={{ color: T.stone400, letterSpacing: '0.08em' }}>
-                          <TrendingUp className="w-3 h-3 text-emerald-500" /> Margem de Lucro Desejada (%)
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text" value={formMargem} onChange={e => setFormMargem(e.target.value)}
-                            placeholder="30"
-                            className="w-full p-3 pr-8 rounded-xl font-medium outline-none text-sm transition-all"
-                            style={{ background: T.paper2, border: `1px solid ${T.stone200}`, color: T.ink }}
-                          />
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 font-semibold text-xs" style={{ color: T.stone400 }}>%</span>
-                        </div>
-                      </div>
-
-                      {/* Barra visual */}
-                      {totalPercentual > 0 && (
-                        <div className="space-y-1.5">
-                          <div className="flex justify-between text-[12px] font-semibold" style={{ color: T.stone400 }}>
-                            <span>Do preço de venda:</span>
-                            <span style={totalPercentual >= 100 ? { color: '#B91C1C' } : { color: T.stone500 }}>{totalPercentual.toFixed(0)}% alocado em %</span>
-                          </div>
-                          <div className="flex h-2 rounded-full overflow-hidden" style={{ background: T.paper2 }}>
-                            {impostosNum > 0 && <div className="bg-red-400 transition-all" style={{ width: `${Math.min(impostosNum, 100)}%` }} />}
-                            {taxaCanal > 0 && <div className="transition-all" style={{ width: `${Math.min(taxaCanal, 100 - impostosNum)}%`, background: T.stone400 }} />}
-                            {margemDesejadaNum > 0 && <div className="bg-emerald-400 transition-all" style={{ width: `${Math.min(margemDesejadaNum, 100 - impostosNum - taxaCanal)}%` }} />}
-                          </div>
-                          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-                            {impostosNum > 0 && <span className="text-[9px] text-red-500 font-semibold flex items-center gap-0.5"><span className="w-2 h-2 rounded-full bg-red-400 inline-block" /> Impostos {impostosNum}%</span>}
-                            {taxaCanal > 0 && <span className="text-[9px] font-semibold flex items-center gap-0.5" style={{ color: T.stone500 }}><span className="w-2 h-2 rounded-full inline-block" style={{ background: T.stone400 }} /> Canal {taxaCanal}%</span>}
-                            {margemDesejadaNum > 0 && <span className="text-[9px] text-emerald-600 font-semibold flex items-center gap-0.5"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Lucro {margemDesejadaNum}%</span>}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
 
@@ -998,43 +1021,91 @@ export function FichaTecnica({ produtos, perfil, isReadOnly }: { produtos: any[]
                           {porcoesNum > 1 && <p className="text-xs font-medium mt-1" style={{ color: T.stone400 }}>por porção · {formatBRL(precoSugerido * porcoesNum)} para {porcoesNum} porções</p>}
                         </div>
 
-                        <div className="space-y-2 text-sm pt-3" style={{ borderTop: `1px solid ${T.stone200}` }}>
-                          <div className="flex justify-between" style={{ color: T.stone600 }}>
-                            <span>(-) Ingredientes/porção</span>
-                            <span className="font-semibold">
-                              {formatBRL(custoPorPorcaoForm)}
-                              <span className="text-xs ml-1" style={{ color: T.stone400 }}>({((custoPorPorcaoForm / precoSugerido) * 100).toFixed(0)}%)</span>
-                            </span>
+                        {/* Barra de composição do preço de venda (sempre visível) */}
+                        <div className="space-y-2">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.08em]" style={{ color: T.stone400 }}>Composição do preço de venda</p>
+                          <div className="flex h-3 rounded-full overflow-hidden" style={{ background: T.paper2 }}>
+                            {composicaoPreco.map((c, i) => (
+                              <div
+                                key={i}
+                                className="transition-all"
+                                style={{ width: `${(c.valor / precoSugerido) * 100}%`, background: c.cor }}
+                                title={`${c.label}: ${formatBRL(c.valor)} (${((c.valor / precoSugerido) * 100).toFixed(0)}%)`}
+                              />
+                            ))}
                           </div>
-                          {embalagemNum > 0 && (
-                            <div className="flex justify-between" style={{ color: T.stone600 }}>
-                              <span>(-) Embalagem</span>
-                              <span className="font-semibold">{formatBRL(embalagemNum)} <span className="text-xs" style={{ color: T.stone400 }}>({((embalagemNum / precoSugerido) * 100).toFixed(0)}%)</span></span>
-                            </div>
-                          )}
-                          {custoFixoPorcaoNum > 0 && (
-                            <div className="flex justify-between" style={{ color: T.stone600 }}>
-                              <span>(-) Custo Fixo/porção</span>
-                              <span className="font-semibold">{formatBRL(custoFixoPorcaoNum)} <span className="text-xs" style={{ color: T.stone400 }}>({((custoFixoPorcaoNum / precoSugerido) * 100).toFixed(0)}%)</span></span>
-                            </div>
-                          )}
-                          {taxaCanal > 0 && canalSelecionado && (
-                            <div className="flex justify-between" style={{ color: T.stone600 }}>
-                              <span>(-) {canalSelecionado.nome} ({taxaCanal}%)</span>
-                              <span className="font-semibold">{formatBRL(precoSugerido * taxaCanal / 100)}</span>
-                            </div>
-                          )}
-                          {impostosNum > 0 && (
-                            <div className="flex justify-between" style={{ color: T.stone600 }}>
-                              <span>(-) Impostos ({impostosNum}%)</span>
-                              <span className="font-semibold">{formatBRL(precoSugerido * impostosNum / 100)}</span>
-                            </div>
-                          )}
-                          <div className="flex justify-between pt-2" style={{ borderTop: `1px solid ${T.stone200}` }}>
-                            <span className="font-semibold" style={{ color: T.margem }}>(=) Seu Lucro ({margemDesejadaNum}%)</span>
-                            <span className="font-semibold" style={{ color: T.margem }}>{formatBRL(precoSugerido * margemDesejadaNum / 100)}</span>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            {composicaoPreco.map((c, i) => (
+                              <span key={i} className="text-[10px] font-semibold flex items-center gap-1" style={{ color: T.stone500 }}>
+                                <span className="w-2 h-2 rounded-full inline-block" style={{ background: c.cor }} />
+                                {c.label} {((c.valor / precoSugerido) * 100).toFixed(0)}%
+                              </span>
+                            ))}
                           </div>
                         </div>
+
+                        {/* Toggle: fórmula e detalhamento (progressive disclosure) */}
+                        <button
+                          onClick={() => setShowDetalhes(!showDetalhes)}
+                          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition-all"
+                          style={{ border: `1px solid ${T.stone200}`, color: T.stone600, background: 'white' }}
+                          onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'white'}
+                        >
+                          {showDetalhes ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                          {showDetalhes ? "Ocultar fórmula e detalhes" : "Ver fórmula e detalhes"}
+                        </button>
+
+                        {showDetalhes && (
+                          <div className="space-y-4">
+                            {/* Card da fórmula: custo ÷ divisor = preço */}
+                            <div className="rounded-xl p-4" style={{ background: 'white', border: `1px solid ${T.stone200}` }}>
+                              <div className="flex items-center gap-1.5 mb-3">
+                                <Calculator className="w-3.5 h-3.5" style={{ color: T.margem }} />
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.08em]" style={{ color: T.stone400 }}>Como o preço é formado</p>
+                              </div>
+                              <div className="flex items-stretch gap-1.5 text-center">
+                                <div className="flex-1 rounded-lg py-2 px-1" style={{ background: T.paper2 }}>
+                                  <p className="text-[9px] font-semibold uppercase tracking-wide" style={{ color: T.stone400 }}>Custo Base</p>
+                                  <p className="font-semibold text-[13px] mt-0.5" style={{ color: T.ink }}>{formatBRL(custoBasePrec)}</p>
+                                </div>
+                                <div className="flex items-center font-light text-lg px-0.5" style={{ color: T.stone400 }}>÷</div>
+                                <div className="flex-1 rounded-lg py-2 px-1" style={{ background: T.paper2 }}>
+                                  <p className="text-[9px] font-semibold uppercase tracking-wide" style={{ color: T.stone400 }}>Divisor</p>
+                                  <p className="font-semibold text-[13px] mt-0.5 tabular-nums" style={{ color: T.ink }}>{divisorMarkup.toFixed(2).replace('.', ',')}</p>
+                                  <p className="text-[9px] mt-0.5 tabular-nums" style={{ color: T.stone400 }}>1 − {totalPercentual.toFixed(0)}%</p>
+                                </div>
+                                <div className="flex items-center font-light text-lg px-0.5" style={{ color: T.stone400 }}>=</div>
+                                <div className="flex-1 rounded-lg py-2 px-1" style={{ background: T.margemSoft }}>
+                                  <p className="text-[9px] font-semibold uppercase tracking-wide" style={{ color: T.margem }}>Preço</p>
+                                  <p className="font-semibold text-[13px] mt-0.5" style={{ color: T.margem }}>{formatBRL(precoSugerido)}</p>
+                                </div>
+                              </div>
+                              <p className="text-[11px] mt-3 leading-snug" style={{ color: T.stone400 }}>
+                                Dividir o custo pelo divisor embute impostos, taxa de canal e seu lucro dentro do preço final.
+                              </p>
+                            </div>
+
+                        {/* Detalhamento em valores (R$) — cores casam com a barra acima */}
+                        <div className="space-y-2 text-sm pt-3" style={{ borderTop: `1px solid ${T.stone200}` }}>
+                          {composicaoPreco.map((c, i) => (
+                            <div
+                              key={i}
+                              className={c.destaque ? "flex justify-between items-center pt-2" : "flex justify-between items-center"}
+                              style={c.destaque ? { borderTop: `1px solid ${T.stone200}`, color: T.margem } : { color: T.stone600 }}
+                            >
+                              <span className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full inline-block flex-shrink-0" style={{ background: c.cor }} />
+                                {c.destaque ? "(=) Seu Lucro" : `(−) ${c.label}`}
+                              </span>
+                              <span className="font-semibold">
+                                {formatBRL(c.valor)}
+                                <span className="text-xs ml-1" style={{ color: c.destaque ? T.margem : T.stone400 }}>({((c.valor / precoSugerido) * 100).toFixed(0)}%)</span>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                          </div>
+                        )}
 
                         {precoVendaNum > 0 && precoVendaNum < precoSugerido && (
                           <div className="bg-red-50 border border-red-200 p-3 rounded-xl flex items-start gap-2">

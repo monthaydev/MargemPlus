@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react"
 import { supabase } from "@/lib/supabase"
 
-const PERFIL_SELECT = '*, empresa:empresas(id, nome, meta_cmv, categorias_custos, categorias_produtos, unidades, logo_url, cor_principal, plano, senha_desbloqueio, imposto_padrao_pct, dias_alerta_lote), cargo:cargos(id, nome, permissoes)'
+const PERFIL_SELECT = '*, empresa:empresas(id, nome, meta_cmv, categorias_custos, categorias_produtos, unidades, logo_url, cor_principal, plano, pin_configurado, imposto_padrao_pct, dias_alerta_lote), cargo:cargos(id, nome, permissoes)'
 
 export function useAuth() {
   const [sessao, setSessao] = useState<any>(null)

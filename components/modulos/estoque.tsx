@@ -1,5 +1,6 @@
 ﻿"use client"
 
+import { useState } from "react"
 import {
   Package, ShoppingCart, Trash2, Save, CheckCircle2,
   ArrowDownToLine, Lock, Pencil, X, MinusCircle, Layers, AlertTriangle,
@@ -32,11 +33,13 @@ const iconeLocal = (tipo: string) => {
 
 export function Estoque(props: any) {
   const { isReadOnly, produtos, data, onSemanaFechada } = props
+  const [pendingDel, setPendingDel] = useState<{ id: number; tabela: string } | null>(null)
 
   const {
     aba, setAba, novoLancamento, setNovoLancamento,
     faturamento, setFaturamento, contagem, setContagem,
     editandoCompraId, setEditandoCompraId,
+    locaisEstoque,
     lotes, carregandoLotes,
     getPrecoFinalAplicado,
     handleSalvarCompra, cancelarEdicaoCompra, handleSalvarSaida,
@@ -198,7 +201,32 @@ export function Estoque(props: any) {
                         value={novoLancamento.dataValidade}
                         onChange={e => setNovoLancamento({ ...novoLancamento, dataValidade: e.target.value })}
                       />
+                      {!novoLancamento.dataValidade && (
+                        <p className="text-[11px] mt-1 flex items-center gap-1" style={{ color: T.stone400 }}>
+                          <AlertTriangle className="w-3 h-3 flex-shrink-0" style={{ color: T.warning }} />
+                          Informe para ativar alertas FEFO e controle de risco de perda.
+                        </p>
+                      )}
                     </div>
+                    {locaisEstoque.length > 0 && (
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[12px] font-semibold uppercase tracking-wider flex items-center gap-1.5"
+                          style={{ color: T.stone400 }}>
+                          <Warehouse className="w-3 h-3" style={{ color: T.stone400 }} />
+                          Local de Armazenamento
+                        </label>
+                        <select
+                          className="p-3 rounded-xl border text-[14px] font-medium outline-none bg-white transition-all duration-150"
+                          style={{ borderColor: T.stone200, color: T.ink }}
+                          value={novoLancamento.localId}
+                          onChange={e => setNovoLancamento({ ...novoLancamento, localId: e.target.value })}>
+                          <option value="">Padrão (Almoxarifado)</option>
+                          {locaisEstoque.map((l: any) => (
+                            <option key={l.id} value={l.id}>{l.nome}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -228,28 +256,46 @@ export function Estoque(props: any) {
                       <td className="py-3.5 text-right text-[14px] font-semibold tabular-nums" style={{ color: T.ink }}>{formatBRL(c.valorTotal)}</td>
                       {!isReadOnly && (
                         <td className="py-3.5 text-right">
-                          <div className="flex justify-end gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                            <button
-                              onClick={() => {
-                                setEditandoCompraId(c.id)
-                                setNovoLancamento({ ...novoLancamento, produto: c.produto, quantidade: c.quantidade.toString(), valorTotal: c.valorTotal.toFixed(2), motivo: "Quebra/Desperdício", dataValidade: "", localId: "" })
-                                window.scrollTo({ top: 0, behavior: 'smooth' })
-                              }}
-                              className="p-1.5 rounded-lg border transition-all duration-150"
-                              style={{ color: T.stone400, borderColor: T.stone200 }}
-                              onMouseEnter={e => { e.currentTarget.style.color = T.ink; e.currentTarget.style.backgroundColor = T.paper2 }}
-                              onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
-                              <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                            </button>
-                            <button
-                              onClick={() => handleExcluir(c.id, 'compras')}
-                              className="p-1.5 rounded-lg border transition-all duration-150"
-                              style={{ color: T.stone400, borderColor: T.stone200 }}
-                              onMouseEnter={e => { e.currentTarget.style.color = T.negative; e.currentTarget.style.backgroundColor = T.negSoft }}
-                              onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
-                              <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                            </button>
-                          </div>
+                          {pendingDel?.id === c.id && pendingDel?.tabela === 'compras' ? (
+                            <div className="flex justify-end items-center gap-1.5">
+                              <button
+                                onClick={() => { handleExcluir(c.id, 'compras'); setPendingDel(null) }}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                                style={{ background: T.negSoft, color: T.negative }}>
+                                Excluir
+                              </button>
+                              <button onClick={() => setPendingDel(null)}
+                                className="p-1.5 rounded-lg transition-all"
+                                style={{ color: T.stone400 }}
+                                onMouseEnter={e => { e.currentTarget.style.color = T.ink }}
+                                onMouseLeave={e => { e.currentTarget.style.color = T.stone400 }}>
+                                <X className="w-3.5 h-3.5" strokeWidth={1.5} />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex justify-end gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                              <button
+                                onClick={() => {
+                                  setEditandoCompraId(c.id)
+                                  setNovoLancamento({ ...novoLancamento, produto: c.produto, quantidade: c.quantidade.toString(), valorTotal: c.valorTotal.toFixed(2), motivo: "Quebra/Desperdício", dataValidade: "", localId: "" })
+                                  window.scrollTo({ top: 0, behavior: 'smooth' })
+                                }}
+                                className="p-1.5 rounded-lg border transition-all duration-150"
+                                style={{ color: T.stone400, borderColor: T.stone200 }}
+                                onMouseEnter={e => { e.currentTarget.style.color = T.ink; e.currentTarget.style.backgroundColor = T.paper2 }}
+                                onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
+                                <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                              </button>
+                              <button
+                                onClick={() => setPendingDel({ id: c.id, tabela: 'compras' })}
+                                className="p-1.5 rounded-lg border transition-all duration-150"
+                                style={{ color: T.stone400, borderColor: T.stone200 }}
+                                onMouseEnter={e => { e.currentTarget.style.color = T.negative; e.currentTarget.style.backgroundColor = T.negSoft }}
+                                onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
+                                <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                              </button>
+                            </div>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -383,14 +429,32 @@ export function Estoque(props: any) {
                       <td className="py-3.5 text-right text-[14px] font-semibold tabular-nums" style={{ color: T.negative }}>{formatBRL(s.valorTotal)}</td>
                       {!isReadOnly && (
                         <td className="py-3.5 text-right">
-                          <button
-                            onClick={() => handleExcluir(s.id, 'saidas_avulsas')}
-                            className="p-1.5 rounded-lg border transition-all opacity-0 group-hover:opacity-100"
-                            style={{ color: T.stone400, borderColor: T.stone200 }}
-                            onMouseEnter={e => { e.currentTarget.style.color = T.negative; e.currentTarget.style.backgroundColor = T.negSoft }}
-                            onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
-                            <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                          </button>
+                          {pendingDel?.id === s.id && pendingDel?.tabela === 'saidas_avulsas' ? (
+                            <div className="flex justify-end items-center gap-1.5">
+                              <button
+                                onClick={() => { handleExcluir(s.id, 'saidas_avulsas'); setPendingDel(null) }}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                                style={{ background: T.negSoft, color: T.negative }}>
+                                Excluir
+                              </button>
+                              <button onClick={() => setPendingDel(null)}
+                                className="p-1.5 rounded-lg transition-all"
+                                style={{ color: T.stone400 }}
+                                onMouseEnter={e => { e.currentTarget.style.color = T.ink }}
+                                onMouseLeave={e => { e.currentTarget.style.color = T.stone400 }}>
+                                <X className="w-3.5 h-3.5" strokeWidth={1.5} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setPendingDel({ id: s.id, tabela: 'saidas_avulsas' })}
+                              className="p-1.5 rounded-lg border transition-all opacity-0 group-hover:opacity-100"
+                              style={{ color: T.stone400, borderColor: T.stone200 }}
+                              onMouseEnter={e => { e.currentTarget.style.color = T.negative; e.currentTarget.style.backgroundColor = T.negSoft }}
+                              onMouseLeave={e => { e.currentTarget.style.color = T.stone400; e.currentTarget.style.backgroundColor = 'transparent' }}>
+                              <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                            </button>
+                          )}
                         </td>
                       )}
                     </tr>

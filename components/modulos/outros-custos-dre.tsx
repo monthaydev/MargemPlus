@@ -33,12 +33,8 @@ export function OutrosCustosDRE({ data, dataInicio, dataFim, onChange, onPerfilR
     const payload: Record<string, number> = {}
     Object.entries(valores).forEach(([cat, val]) => { payload[cat] = parseValor(val) })
 
-    const { data: existente } = await supabase.from('financas_semanais').select('id').eq('data_inicio', dataInicio).maybeSingle()
-
-    const dadosUpdate = { outros_custos: payload }
-    const { error } = existente
-      ? await supabase.from('financas_semanais').update(dadosUpdate).eq('id', existente.id)
-      : await supabase.from('financas_semanais').insert([{ data_inicio: dataInicio, data_fim: dataFim, faturamento: 0, ...dadosUpdate }])
+    const { error } = await supabase.from('financas_semanais')
+      .upsert({ empresa_id: perfil?.empresa_id, data_inicio: dataInicio, data_fim: dataFim, outros_custos: payload }, { onConflict: 'empresa_id,data_inicio' })
 
     setSalvando(false)
     if (error) toast.error("Erro ao salvar custos.")

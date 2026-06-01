@@ -44,7 +44,7 @@ export function Configuracoes({ perfil, onRefresh, isDark, onThemeChange }: any)
   const [novoPin, setNovoPin] = useState("")
   const [confirmarPin, setConfirmarPin] = useState("")
   const [salvandoPin, setSalvandoPin] = useState(false)
-  const pinJaCadastrado = !!(perfil?.empresa?.senha_desbloqueio)
+  const pinJaCadastrado = !!(perfil?.empresa?.pin_configurado)
 
   const [impostoDefault, setImpostoDefault] = useState(String(perfil?.empresa?.imposto_padrao_pct ?? 0))
   const [diasAlerta, setDiasAlerta] = useState(String(perfil?.empresa?.dias_alerta_lote ?? 7))
@@ -124,9 +124,11 @@ export function Configuracoes({ perfil, onRefresh, isDark, onThemeChange }: any)
     if (novoPin.length < 4) return toast.error("PIN precisa de pelo menos 4 caracteres.")
     if (novoPin !== confirmarPin) return toast.error("Os PINs não coincidem.")
     setSalvandoPin(true)
-    const { error } = await supabase.from('empresas').update({ senha_desbloqueio: novoPin }).eq('id', perfil.empresa_id)
+    // O PIN é gravado como hash bcrypt no servidor (RPC) — nunca em texto plano.
+    const { data: result, error } = await supabase.rpc('definir_pin_desbloqueio', { p_pin: novoPin })
     setSalvandoPin(false)
     if (error) return toast.error("Erro ao salvar PIN: " + error.message)
+    if (!result?.ok) return toast.error(result?.erro || "Não foi possível salvar o PIN.")
     toast.success(pinJaCadastrado ? "PIN atualizado!" : "PIN de desbloqueio criado!")
     setNovoPin(""); setConfirmarPin("")
     onRefresh?.()
@@ -134,8 +136,9 @@ export function Configuracoes({ perfil, onRefresh, isDark, onThemeChange }: any)
 
   const handleRemoverPin = async () => {
     if (!confirm("Remover o PIN? O desbloqueio vai exigir a senha de login novamente.")) return
-    const { error } = await supabase.from('empresas').update({ senha_desbloqueio: null }).eq('id', perfil.empresa_id)
+    const { data: result, error } = await supabase.rpc('remover_pin_desbloqueio')
     if (error) return toast.error("Erro: " + error.message)
+    if (!result?.ok) return toast.error(result?.erro || "Não foi possível remover o PIN.")
     toast.success("PIN removido.")
     onRefresh?.()
   }

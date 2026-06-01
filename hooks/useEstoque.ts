@@ -80,8 +80,9 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
     }
   }
 
-  const getPrecoFinalAplicado = (produtoId: number, produtoNome: string) => {
-    const comprasDoProduto = (data.compras || []).filter((c: any) => c.produto === produtoNome)
+  const getPrecoFinalAplicado = (produtoId: number, _produtoNome?: string) => {
+    // Filtra por produto_id (robusto a renomeação do insumo no meio do ciclo).
+    const comprasDoProduto = (data.compras || []).filter((c: any) => c.produto_id === produtoId)
     if (comprasDoProduto.length > 0) return parseFloat(comprasDoProduto[comprasDoProduto.length - 1].valorUnitario)
     const valorInicial = contagemInicial[produtoId]?.valor
     return parseFloat(valorInicial?.replace(',', '.') || "0")
@@ -96,6 +97,8 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
 
     const vTotal = parseFloat(novoLancamento.valorTotal.replace(',', '.'))
     const qtd = parseFloat(novoLancamento.quantidade.replace(',', '.'))
+    if (isNaN(qtd) || qtd <= 0) return toast.error("Quantidade precisa ser maior que zero.")
+    if (isNaN(vTotal) || vTotal < 0) return toast.error("Valor total inválido.")
     const precoUnitario = vTotal / qtd
 
     if (editandoCompraId) {
@@ -187,9 +190,11 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
     onChange()
   }
 
+  const TABELAS_EXCLUSAO_PERMITIDAS = ['compras', 'saidas_avulsas'] as const
+
   const handleExcluir = async (id: number, tabela: string) => {
     if (isReadOnly) return toast.error("Período travado para edições!")
-    if (!confirm("Apagar lançamento?")) return
+    if (!TABELAS_EXCLUSAO_PERMITIDAS.includes(tabela as any)) return toast.error("Operação não permitida.")
     const { error } = await supabase.from(tabela).delete().eq('id', id)
     if (error) return toast.error("Erro: " + error.message)
     toast.success("Removido!")
@@ -202,14 +207,7 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
     toast.loading(`Salvando Estoque ${tipo}...`, { id: "salva-estoque" })
 
     try {
-      const { error: errDel } = await supabase.from('estoques')
-        .delete()
-        .eq('tipo_contagem', tipo)
-        .gte('data_contagem', dataInicio)
-        .lte('data_contagem', dataFim)
-      if (errDel) throw errDel
-
-      const inserts = Object.entries(contagem).map(([id, d]) => {
+      const itens = Object.entries(contagem).map(([id, d]) => {
         const pId = parseInt(id)
         const produto = produtos.find((p: any) => p.id === pId)
         const qtdStr = d?.qtd?.toString().trim() || ""
@@ -219,10 +217,9 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
         if (tipo === "Inicial" && qtdStr === "" && valStr === "") return null
 
         let q = parseFloat(qtdStr.replace(',', '.'))
-        let valorUnitario = 0
-
         if (isNaN(q)) q = 0
 
+        let valorUnitario = 0
         if (tipo === "Final") {
           valorUnitario = getPrecoFinalAplicado(pId, produto?.nome || "")
         } else {
@@ -230,17 +227,20 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
           if (isNaN(valorUnitario)) valorUnitario = 0
         }
 
-        return { produto_id: pId, quantidade: q, valor_unitario: valorUnitario, tipo_contagem: tipo, data_contagem: dataInicio }
+        return { produto_id: pId, quantidade: q, valor_unitario: valorUnitario }
       }).filter(i => i !== null)
 
-      if (inserts.length > 0) {
-        const { error: insErr } = await supabase.from('estoques').insert(inserts)
-        if (insErr) throw insErr
-        toast.success(`Estoque ${tipo} salvo!`, { id: "salva-estoque" })
-      } else {
-        toast.success(`Estoque ${tipo} atualizado (Vazio)!`, { id: "salva-estoque" })
-      }
+      // RPC transacional: o delete e os inserts acontecem juntos ou nada acontece.
+      const { data: result, error } = await supabase.rpc('salvar_contagem', {
+        p_tipo: tipo,
+        p_data: dataInicio,
+        p_data_fim: dataFim,
+        p_itens: itens,
+      })
+      if (error) throw error
+      if (!result?.ok) throw new Error(result?.erro || "Falha ao salvar a contagem.")
 
+      toast.success(`Estoque ${tipo} salvo!`, { id: "salva-estoque" })
       await onChange()
     } catch (error: any) {
       toast.error("Erro ao salvar: " + error.message, { id: "salva-estoque", duration: 5000 })
@@ -274,9 +274,9 @@ export function useEstoque({ dataInicio, dataFim, produtos, data, contagemInicia
   const handleSalvarFaturamento = async () => {
     if (isReadOnly) return toast.error("Período travado para edições!")
     const fatVal = parseFloat(faturamento.replace(',', '.')) || 0
-    const { data: ex } = await supabase.from('financas_semanais').select('id').eq('data_inicio', dataInicio).maybeSingle()
-    if (ex) await supabase.from('financas_semanais').update({ faturamento: fatVal }).eq('id', ex.id)
-    else await supabase.from('financas_semanais').insert([{ data_inicio: dataInicio, data_fim: dataFim, faturamento: fatVal }])
+    const { error } = await supabase.from('financas_semanais')
+      .upsert({ empresa_id: perfil?.empresa_id, data_inicio: dataInicio, data_fim: dataFim, faturamento: fatVal }, { onConflict: 'empresa_id,data_inicio' })
+    if (error) return toast.error("Erro ao salvar faturamento: " + error.message)
     toast.success("Faturamento salvo!")
     onChange()
   }

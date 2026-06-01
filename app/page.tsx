@@ -177,7 +177,7 @@ export default function Page() {
         <ModalDesbloqueio
           dataInicio={app.dataInicio}
           temOpcaoVoltar={!!app.dataAnteriorAoModal}
-          temPinConfigurado={!!perfil?.empresa?.senha_desbloqueio}
+          temPinConfigurado={!!perfil?.empresa?.pin_configurado}
           pin={app.pinDesbloqueio}
           onPinChange={app.setPinDesbloqueio}
           verificando={app.verificandoPin}

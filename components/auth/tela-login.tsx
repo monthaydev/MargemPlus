@@ -82,28 +82,23 @@ export function TelaLogin({ onAuthenticated }: { onAuthenticated: () => Promise<
         setAuthLoading(false)
         return toast.error("Preencha todos os campos.")
       }
-      toast.loading("Validando código...", { id: "setup" })
-      const codigo = authForm.codigoConvite.trim().toUpperCase()
-      const { data: cargoResult, error: cargoErr } = await supabase.rpc('validar_codigo_convite', { codigo })
-      const cargoData = Array.isArray(cargoResult) ? cargoResult[0] : cargoResult
-      if (cargoErr || !cargoData) {
-        toast.error("Código de convite inválido.", { id: "setup", duration: 7000 })
-        setAuthLoading(false)
-        return
-      }
       toast.loading("Criando seu acesso...", { id: "setup" })
+      const codigo = authForm.codigoConvite.trim().toUpperCase()
       const { data: authData, error: authError } = await supabase.auth.signUp({ email: authForm.email, password: authForm.senha })
       if (authError) {
         toast.error(traduzirErroAuth(authError.message), { id: "setup", duration: 7000 })
       } else if (authData.user) {
-        const { error: perfError } = await supabase.from('perfis').insert([{
-          id: authData.user.id, empresa_id: cargoData.empresa_id, nome_completo: authForm.nomeCompleto,
-          cargo: cargoData.nome, cargo_id: cargoData.id, role: 'funcionario', ativo: true
-        }])
-        if (perfError) toast.error(`Erro ao criar perfil: ${perfError.message}`, { id: "setup" })
-        else {
-          toast.success(`Bem-vindo(a)! Cargo: ${cargoData.nome}`, { id: "setup" })
+        // O perfil é criado por uma RPC no servidor: ela valida o convite e
+        // FORÇA role='funcionario' + empresa do convite (impede virar dono de outra empresa).
+        const { data: result, error: rpcError } = await supabase
+          .rpc('criar_conta_funcionario', { p_codigo: codigo, p_nome: authForm.nomeCompleto })
+        if (rpcError) {
+          toast.error(`Erro ao criar acesso: ${rpcError.message}`, { id: "setup", duration: 8000 })
+        } else if (result?.ok) {
+          toast.success(`Bem-vindo(a)! Cargo: ${result.cargo}`, { id: "setup" })
           await onAuthenticated()
+        } else {
+          toast.error(result?.erro || "Código de convite inválido.", { id: "setup", duration: 7000 })
         }
       }
     }
