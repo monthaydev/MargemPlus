@@ -10,6 +10,7 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
   const [dataFim, setDataFim] = useState(calcularDataFim(getSegundaFeiraAtual()))
 
   const [produtos, setProdutos] = useState<any[]>([])
+  const [produtosCarregados, setProdutosCarregados] = useState(false)
   const [lancamentos, setLancamentos] = useState<any>({ compras: [], faturamento: 0, saidas: [], outrosCustos: {} })
   const [contagemInicial, setContagemInicial] = useState<any>({})
   const [contagemFinal, setContagemFinal] = useState<any>({})
@@ -29,6 +30,7 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
     if (!sessao || !perfil) return
     const { data } = await supabase.from('produtos').select('*').order('nome')
     if (data) setProdutos(data.map((p: any) => ({ id: p.id, nome: p.nome, unidade: p.unidade, grupo: p.grupo || 'Sem Grupo', producao_interna: p.producao_interna || false, rendimento: p.rendimento ?? 100 })))
+    setProdutosCarregados(true)
   }
 
   const carregarDadosDoBanco = async () => {
@@ -169,7 +171,7 @@ export function useAppData({ sessao, perfil }: { sessao: any; perfil: any }) {
 
   return {
     dataInicio, setDataInicio, dataFim,
-    produtos, lancamentos, contagemInicial, contagemFinal, bloqueioAtivo,
+    produtos, produtosCarregados, lancamentos, contagemInicial, contagemFinal, bloqueioAtivo,
     carregarProdutos, carregarDadosDoBanco,
     // semana
     showModalDesbloqueio, pinDesbloqueio, setPinDesbloqueio, verificandoPin,

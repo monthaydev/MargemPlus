@@ -24,6 +24,7 @@ import { Videos } from "@/components/modulos/videos"
 import { TelaLogin } from "@/components/auth/tela-login"
 import { TelaSetup } from "@/components/auth/tela-setup"
 import { TelaDesativado } from "@/components/auth/tela-desativado"
+import { ModalBoasVindas } from "@/components/onboarding/modal-boas-vindas"
 import { Sidebar, type MenuItem } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { ModalDesbloqueio } from "@/components/modals/modal-desbloqueio"
@@ -38,6 +39,7 @@ import { T } from "@/lib/design-tokens"
 import { aplicarCorMarca } from "@/lib/cores"
 import { getSegundaFeiraAtual } from "@/lib/dates"
 import { TELA_META, navGroups, type Tela } from "@/lib/navegacao"
+import { isWelcomeVisto } from "@/lib/onboarding"
 
 export default function Page() {
   const { sessao, perfil, carregandoAuth, checkUser, refreshPerfil, handleLogout } = useAuth()
@@ -47,6 +49,7 @@ export default function Page() {
   const [menuAberto, setMenuAberto] = useState(false)
   const [isDark, setIsDark] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [mostrarWelcome, setMostrarWelcome] = useState(false)
 
   useEffect(() => {
     if (localStorage.getItem('theme') === 'dark') setIsDark(true)
@@ -55,6 +58,14 @@ export default function Page() {
 
   // Aplica a identidade visual do restaurante ao carregar/atualizar o perfil.
   useEffect(() => { aplicarCorMarca(perfil?.empresa?.cor_principal) }, [perfil?.empresa?.cor_principal])
+
+  // Abre o modal de boas-vindas para novos clientes após confirmar que não há produtos.
+  useEffect(() => {
+    if (!perfil?.empresa?.id || !app.produtosCarregados) return
+    if (!isWelcomeVisto(perfil.empresa.id) && app.produtos.length === 0) {
+      setMostrarWelcome(true)
+    }
+  }, [perfil?.empresa?.id, app.produtosCarregados, app.produtos.length])
 
   const toggleDark = () => {
     setIsDark(d => {
@@ -157,7 +168,7 @@ export default function Page() {
         {/* Main */}
         <main className="flex-1 p-4 sm:p-6">
           <div className="max-w-7xl mx-auto">
-            {telaEfetiva === "home"                 && <Home perfil={perfil} modulosVisiveis={Menus.filter(m => m.id !== "home").map(m => m.id)} isPremium={isPremium} dataInicio={app.dataInicio} dataFim={app.dataFim} bloqueioAtivo={app.bloqueioAtivo} lancamentos={app.lancamentos} contagemInicial={app.contagemInicial} contagemFinal={app.contagemFinal} onNavegar={(t) => setTela(t as Tela)} />}
+            {telaEfetiva === "home"                 && <Home perfil={perfil} modulosVisiveis={Menus.filter(m => m.id !== "home").map(m => m.id)} isPremium={isPremium} dataInicio={app.dataInicio} dataFim={app.dataFim} bloqueioAtivo={app.bloqueioAtivo} lancamentos={app.lancamentos} contagemInicial={app.contagemInicial} contagemFinal={app.contagemFinal} produtos={app.produtos} produtosCarregados={app.produtosCarregados} onNavegar={(t) => setTela(t as Tela)} onAbrirWelcome={() => setMostrarWelcome(true)} />}
             {telaEfetiva === "dashboard"            && <Dashboard dataInicio={app.dataInicio} dataFim={app.dataFim} lancamentos={app.lancamentos} contagemInicial={app.contagemInicial} contagemFinal={app.contagemFinal} produtos={app.produtos} perfil={perfil} />}
             {telaEfetiva === "cadastros"            && <Cadastros produtos={app.produtos} onRefresh={app.carregarProdutos} onPerfilRefresh={refreshPerfil} isReadOnly={app.bloqueioAtivo || !podeEditarCadastros} perfil={perfil} />}
             {telaEfetiva === "outros-custos"        && <OutrosCustosDRE data={app.lancamentos} dataInicio={app.dataInicio} dataFim={app.dataFim} onChange={app.carregarDadosDoBanco} onPerfilRefresh={refreshPerfil} isReadOnly={app.bloqueioAtivo || !podeEditarDre} perfil={perfil} produtos={app.produtos} contagemInicial={app.contagemInicial} contagemFinal={app.contagemFinal} />}
@@ -172,6 +183,13 @@ export default function Page() {
           </div>
         </main>
       </div>
+
+      {mostrarWelcome && perfil?.empresa?.id && (
+        <ModalBoasVindas
+          empresaId={perfil.empresa.id}
+          onClose={() => setMostrarWelcome(false)}
+        />
+      )}
 
       {app.showModalDesbloqueio && (
         <ModalDesbloqueio

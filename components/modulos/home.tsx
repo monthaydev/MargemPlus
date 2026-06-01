@@ -1,11 +1,16 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import {
   LayoutDashboard, ClipboardList, ReceiptText, LineChart,
   ChefHat, Package, Settings, TrendingDown, ShoppingCart,
-  Utensils, Lock, ArrowRight, CheckCircle2, Sparkles
+  Utensils, Lock, ArrowRight, CheckCircle2, Sparkles, X
 } from "lucide-react"
 import { T } from "@/lib/design-tokens"
+import {
+  isWelcomeVisto, isOnboardingAtivo, ativarOnboarding,
+  isOnboardingDispensado, dispensarOnboarding,
+} from "@/lib/onboarding"
 
 type Tela = "home" | "dashboard" | "cadastros" | "estoque" | "outros-custos" | "relatorios" |
             "fichas" | "configuracoes" | "ruptura" | "compras-inteligente" | "cardapio-inteligente"
@@ -65,26 +70,68 @@ interface HomeProps {
   lancamentos: any
   contagemInicial: Record<string, { qtd: string; valor: string }>
   contagemFinal: Record<string, { qtd: string; valor: string }>
+  produtos: any[]
+  produtosCarregados: boolean
   onNavegar: (tela: Tela) => void
+  onAbrirWelcome?: () => void
 }
 
 export function Home({
   perfil, modulosVisiveis, isPremium,
   dataInicio, dataFim, bloqueioAtivo,
   lancamentos, contagemInicial, contagemFinal,
-  onNavegar
+  produtos, produtosCarregados,
+  onNavegar, onAbrirWelcome,
 }: HomeProps) {
   const primeiroNome = perfil?.nome_completo?.split(' ')[0] || "você"
   const hora = new Date().getHours()
   const saudacao = hora < 12 ? "Bom dia" : hora < 18 ? "Boa tarde" : "Boa noite"
   const fmt = (d: string) => { const [, m, day] = d.split('-'); return `${day}/${m}` }
   const frase = FRASES[new Date().getDate() % FRASES.length]
+  const empresaId = perfil?.empresa?.id as string
 
   // ── Estado do ciclo (só presença, sem expor números — não é dashboard) ───────
   const temInicial  = Object.keys(contagemInicial).length > 0
   const temFinal    = Object.keys(contagemFinal).length > 0
   const temCompras  = (lancamentos.compras || []).length > 0
   const temFat      = (lancamentos.faturamento || 0) > 0
+
+  // ── Onboarding (Primeiros Passos) ────────────────────────────────────────────
+  const [checklistVisivel, setChecklistVisivel] = useState(false)
+  const [welcomeFeito,     setWelcomeFeito]     = useState(false)
+
+  useEffect(() => {
+    if (!empresaId || !produtosCarregados) return
+    const dispensado = isOnboardingDispensado(empresaId)
+    if (dispensado) return
+    // Ativa para novos clientes (sem produtos) ou para quem já estava em onboarding
+    if (produtos.length === 0 || isOnboardingAtivo(empresaId)) {
+      ativarOnboarding(empresaId)
+      setChecklistVisivel(true)
+    }
+    setWelcomeFeito(isWelcomeVisto(empresaId))
+  }, [empresaId, produtosCarregados, produtos.length])
+
+  // Reflete quando o welcome modal é fechado (prop-drill via onAbrirWelcome)
+  useEffect(() => {
+    if (empresaId) setWelcomeFeito(isWelcomeVisto(empresaId))
+  }, [empresaId])
+
+  const handleDispensar = () => {
+    dispensarOnboarding(empresaId)
+    setChecklistVisivel(false)
+  }
+
+  const passosOnboarding = [
+    { id: 'conta',       label: 'Conta criada',                      done: true,                  cta: null,                   acao: null },
+    { id: 'config',      label: 'Configurar meta de CMV e impostos', done: welcomeFeito,          cta: 'Configurar agora',     acao: () => onAbrirWelcome?.() },
+    { id: 'insumos',     label: 'Cadastrar seus primeiros insumos',  done: produtos.length > 0,  cta: 'Ir para Cadastros',    acao: () => onNavegar('cadastros') },
+    { id: 'contagem',    label: 'Fazer a primeira contagem',         done: temInicial,            cta: 'Ir para Estoque',      acao: () => onNavegar('estoque') },
+    { id: 'faturamento', label: 'Lançar o faturamento da semana',    done: temFat,                cta: 'Lançar faturamento',   acao: () => onNavegar('outros-custos') },
+  ] as const
+
+  const todosProntosOnboarding = passosOnboarding.every(p => p.done)
+  const proximoPasso = passosOnboarding.find(p => !p.done)
 
   const ciclo = [
     { label: "Estoque inicial", ok: temInicial, tela: "estoque" as Tela,
@@ -138,6 +185,85 @@ export function Home({
           }
         </div>
       </div>
+
+      {/* ── Primeiros Passos (onboarding) ────────────────────────────────────── */}
+      {checklistVisivel && (
+        <div className="rounded-2xl overflow-hidden animate-in fade-in duration-300" style={{ border: `1px solid ${T.stone200}`, background: T.paper }}>
+
+          {/* Cabeçalho */}
+          <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: `1px solid ${T.stone200}`, background: T.paper2 }}>
+            <div>
+              <p className="text-[11px] font-semibold uppercase" style={{ color: T.stone400, letterSpacing: '0.12em' }}>Configuração inicial</p>
+              <p className="font-semibold text-[15px] mt-0.5" style={{ color: T.ink }}>
+                {todosProntosOnboarding ? '🎉 Tudo pronto — o sistema está operacional' : 'Primeiros Passos'}
+              </p>
+            </div>
+            <button onClick={handleDispensar} className="p-1.5 rounded-lg transition-colors" style={{ color: T.stone400 }}
+              onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = T.stone200}
+              onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+              title="Dispensar">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Lista de passos */}
+          {!todosProntosOnboarding && (
+            <div className="divide-y" style={{ borderColor: T.stone200 }}>
+              {passosOnboarding.map((passo, i) => {
+                const ehProximo = !passo.done && passosOnboarding.slice(0, i).every(p => p.done)
+                return (
+                  <div
+                    key={passo.id}
+                    className="flex items-center justify-between gap-4 px-6 py-4 transition-colors"
+                    style={{ background: ehProximo ? T.margemSoft + '33' : 'transparent' }}
+                  >
+                    <div className="flex items-center gap-3">
+                      {/* Indicador */}
+                      <div
+                        className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold"
+                        style={{
+                          background: passo.done ? T.margem : ehProximo ? T.ink : T.stone200,
+                          color: passo.done || ehProximo ? 'white' : T.stone400,
+                        }}
+                      >
+                        {passo.done ? <CheckCircle2 className="w-3.5 h-3.5" /> : i + 1}
+                      </div>
+                      <p className="text-[14px] font-medium" style={{ color: passo.done ? T.stone400 : T.ink, textDecoration: passo.done ? 'line-through' : 'none' }}>
+                        {passo.label}
+                      </p>
+                    </div>
+                    {ehProximo && passo.acao && (
+                      <button
+                        onClick={passo.acao}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-semibold flex-shrink-0 transition-all active:scale-[0.97]"
+                        style={{ background: T.ink, color: T.paper }}
+                      >
+                        {passo.cta} <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Estado "tudo pronto" */}
+          {todosProntosOnboarding && (
+            <div className="p-6 flex items-center justify-between gap-4">
+              <p className="text-[14px] font-medium" style={{ color: T.stone500 }}>
+                Todos os dados estão configurados. Veja seu CMV no painel da semana.
+              </p>
+              <button
+                onClick={() => { onNavegar('dashboard'); dispensarOnboarding(empresaId) }}
+                className="flex items-center gap-2 px-5 py-3 rounded-xl text-[14px] font-semibold flex-shrink-0 transition-all active:scale-[0.97]"
+                style={{ background: T.margem, color: 'white' }}
+              >
+                Ver CMV <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Frase editorial ──────────────────────────────────────────────────── */}
       <div className="border-l-2 pl-5 py-1" style={{ borderColor: T.margem }}>
